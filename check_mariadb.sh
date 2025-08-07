@@ -30,26 +30,21 @@ hosts=(
 "svgt424 198.59.144.249"
 )
 
-echo -e "\n📡 Escaneando servidores MySQL/MariaDB en puerto 3306...\n"
+echo -e "\n📡 Escaneando servidores por telnet en puerto 3306...\n"
 
 for entry in "${hosts[@]}"; do
     hostname=$(echo "$entry" | awk '{print $1}')
     ip=$(echo "$entry" | awk '{print $2}')
 
-    # Captura de banner con mayor timeout
-    banner=$(timeout 10 bash -c "echo | nc -v $ip 3306 2>/dev/null")
-    nc_result=$?
+    # Usamos telnet con timeout y cortamos la salida
+    banner=$( (echo quit; sleep 1) | timeout 6 telnet "$ip" 3306 2>/dev/null | head -n 5)
 
-    if [[ $nc_result -eq 0 ]]; then
-        if [[ -n "$banner" ]]; then
-            version=$(echo "$banner" | grep -oEi 'MariaDB[^ ]*|MySQL[^ ]*' | head -1)
-            if [[ -n "$version" ]]; then
-                echo "[+] $hostname ($ip) -> $version"
-            else
-                echo "[?] $hostname ($ip) -> Connected, but version not found"
-            fi
+    if [[ $? -eq 0 && -n "$banner" ]]; then
+        version=$(echo "$banner" | grep -oEi 'MariaDB[^ ]*|MySQL[^ ]*' | head -1)
+        if [[ -n "$version" ]]; then
+            echo "[+] $hostname ($ip) -> $version"
         else
-            echo "[~] $hostname ($ip) -> Connected, no banner received"
+            echo "[?] $hostname ($ip) -> Connected, no version found"
         fi
     else
         echo "[-] $hostname ($ip) -> No response on port 3306"
