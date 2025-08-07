@@ -1,52 +1,82 @@
 #!/bin/bash
 
-hosts=(
-"svgt264 198.59.144.25"
-"svgt269 65.99.225.140"
-"svgt270 65.99.252.142"
-"svgt271 65.99.252.56"
-"svgt272 174.136.25.166"
-"svgt279 65.99.225.206"
-"svgt283 65.99.225.134"
-"svgt285 65.99.225.56"
-"svgt286 174.136.25.26"
-"svgt287 65.99.225.136"
-"svgt302 174.136.53.219"
-"svgt303 174.136.53.220"
-"svgt313 198.59.144.126"
-"svgt314 198.59.144.127"
-"svgt326 198.59.144.139"
-"svgt327 198.59.144.140"
-"svgt328 198.59.144.141"
-"svgt332 65.99.252.179"
-"svgt333 65.99.252.27"
-"svgt334 65.99.252.41"
-"svgt385 198.59.144.35"
-"svgt393 198.59.144.178"
-"svgt394 198.59.144.179"
-"svgt395 198.59.144.180"
-"svgt396 198.59.144.181"
-"svgt397 198.59.144.182"
-"svgt424 198.59.144.249"
+ips=(
+65.99.252.19
+65.99.252.172
+72.249.55.24
+174.136.25.9
+174.136.28.105
+72.249.55.19
+174.136.38.38
+174.136.52.203
+174.136.37.107
+174.136.37.108
+174.136.37.109
+65.99.225.31
+65.99.225.37
+65.99.225.41
+65.99.225.55
+174.136.25.23
+174.136.25.35
+65.99.225.81
+207.210.229.118
+174.136.38.17
+207.210.229.91
+207.210.228.67
+207.210.229.84
+198.59.144.5
+198.59.144.6
+198.59.144.7
+198.59.144.8
+198.59.144.15
+198.59.144.16
+198.59.144.17
+198.59.144.18
+198.59.144.19
+65.99.225.24
+198.59.144.25
+65.99.225.140
+65.99.252.142
+65.99.252.56
+174.136.25.166
+65.99.225.206
+65.99.225.134
+65.99.225.56
+174.136.25.26
+65.99.225.136
+174.136.53.219
+174.136.53.220
+198.59.144.126
+198.59.144.127
+198.59.144.139
+198.59.144.140
+198.59.144.141
+65.99.252.179
+65.99.252.27
+65.99.252.41
+198.59.144.35
+198.59.144.178
+198.59.144.179
+198.59.144.180
+198.59.144.181
+198.59.144.182
+198.59.144.249
 )
 
-echo -e "\n📡 Escaneando servidores por telnet en puerto 3306...\n"
+echo -e "\n📡 Escaneando servidores MySQL/MariaDB en puerto 3306 usando telnet...\n"
 
-for entry in "${hosts[@]}"; do
-    hostname=$(echo "$entry" | awk '{print $1}')
-    ip=$(echo "$entry" | awk '{print $2}')
-
-    # Usamos telnet con timeout y cortamos la salida
-    banner=$( (echo quit; sleep 1) | timeout 6 telnet "$ip" 3306 2>/dev/null | head -n 5)
+for ip in "${ips[@]}"; do
+    # Abrimos conexión, esperamos y cerramos
+    banner=$( (echo quit; sleep 1) | timeout 6 telnet "$ip" 3306 2>/dev/null | head -n 5 )
 
     if [[ $? -eq 0 && -n "$banner" ]]; then
-        version=$(echo "$banner" | grep -oEi 'MariaDB[^ ]*|MySQL[^ ]*' | head -1)
+        version=$(echo "$banner" | grep -oEi 'MariaDB[-0-9\.]*|MySQL[-0-9\.]*' | head -1)
         if [[ -n "$version" ]]; then
-            echo "[+] $hostname ($ip) -> $version"
+            echo "[+] $ip -> $version"
         else
-            echo "[?] $hostname ($ip) -> Connected, no version found"
+            echo "[?] $ip -> Conectado, pero versión no detectada"
         fi
     else
-        echo "[-] $hostname ($ip) -> No response on port 3306"
+        echo "[-] $ip -> Sin respuesta en puerto 3306"
     fi
 done
