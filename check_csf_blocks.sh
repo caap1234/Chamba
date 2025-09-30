@@ -1,65 +1,79 @@
 #!/bin/bash
-# Revisa si IPs de los rangos/hosts del SPF están bloqueadas en CSF
-# Imprime SOLO las bloqueadas (usa SHOW_OK=true para ver todas)
+# Revisa IPs de tus rangos/hosts en CSF, en paralelo, mostrando salida en vivo.
 
-SHOW_OK=false  # cambia a true si quieres ver OK/ BLOCKED
-
-# IPs sueltas si solo son algunas ips
-single_ips=(
-  216.55.154.45
-  216.55.154.46
-)
-
-# CIDRs (solo IPv4)
+# ===== Configura aquí =====
 cidrs=(
   69.49.113.0/24
   74.116.88.0/22
   216.55.172.0/24
 )
 
-check_ip() {
-  local ip="$1"
-  # csf -g muestra coincidencias en csf.deny/iptables/ipset
-  local out
-  out="$(csf -g "$ip" 2>/dev/null || true)"
-  if echo "$out" | grep -qiE 'csf\.deny|DENY|DROP|ipset|Chain .* DENY|BLOCK'; then
-    echo "BLOCKED  $ip"
-  else
-    $SHOW_OK && echo "OK       $ip"
-  fi
+singles=(
+  216.55.154.45
+  216.55.154.46
+)
+
+CONCURRENCY="$(nproc 2>/dev/null || echo 8)"   # hilos paralelos (ajústalo si quieres)
+
+# ===== Genera lista completa de IPs =====
+gen_ips() {
+  # /24 => 1..254
+  # /22 => 4 bloques /24 consecutivos
+  for cidr in "${cidrs[@]}"; do
+    base="${cidr%/*}"; mask="${cidr#*/}"
+    IFS='.' read -r a b c d <<< "$base"
+
+    case "$mask" in
+      24)
+        for ((h=1; h<=254; h++)); do
+          printf "%s.%s.%s.%s\n" "$a" "$b" "$c" "$h"
+        done
+        ;;
+      22)
+        for ((cc=c; cc<=c+3; cc++)); do
+          for ((h=1; h<=254; h++)); do
+            printf "%s.%s.%s.%s\n" "$a" "$b" "$cc" "$h"
+          done
+        done
+        ;;
+      *)
+        echo "WARN: Máscara /$mask no soportada en este script simple: $cidr" >&2
+        ;;
+    esac
+  done
+
+  # Agrega IPs sueltas al final
+  for ip in "${singles[@]}"; do
+    echo "$ip"
+  done
 }
 
-echo "== Revisando IPs sueltas =="
-for ip in "${single_ips[@]}"; do
-  check_ip "$ip"
-done
+# ===== Chequeo por IP (sin falsos positivos) =====
+check_one() {
+  ip="$1"
+  out="$(csf -g "$ip" 2>/dev/null || true)"
 
-echo "== Revisando rangos =="
-for cidr in "${cidrs[@]}"; do
-  base_ip="${cidr%/*}"
-  mask="${cidr#*/}"
-  IFS='.' read -r o1 o2 o3 o4 <<< "$base_ip"
+  # Si aparece en csf.deny => bloqueada
+  if echo "$out" | grep -Eqi '^csf\.deny:|/etc/csf/csf\.deny'; then
+    echo "BLOCKED  $ip"; exit 0
+  fi
 
-  case "$mask" in
-    24)
-      # Recorre 1..254 del mismo /24
-      for ((h=1; h<=254; h++)); do
-        check_ip "$o1.$o2.$o3.$h"
-      done
-      ;;
-    22)
-      # Recorre los 4 /24 completos dentro del /22
-      for ((b="$o3"; b<="$o3"+3; b++)); do
-        for ((h=1; h<=254; h++)); do
-          check_ip "$o1.$o2.$b.$h"
-        done
-      done
-      ;;
-    *)
-      echo "Mascara /$mask no manejada por este script simple: $cidr"
-      echo "Añade un caso extra si necesitas otro tamaño."
-      ;;
-  esac
-done
+  # Si iptables NO dice "No matches found ..." => hay coincidencia => bloqueada
+  if ! echo "$out" | grep -Fq "No matches found for $ip in iptables"; then
+    echo "BLOCKED  $ip"; exit 0
+  fi
 
-echo "Listo."
+  # Si IPSET NO dice "No matches found ..." => hay coincidencia => bloqueada
+  if ! echo "$out" | grep -Fq "IPSET: No matches found for $ip"; then
+    echo "BLOCKED  $ip"; exit 0
+  fi
+
+  # Si pasó todo lo anterior, no hay bloqueos
+  echo "OK       $ip"
+}
+
+export -f check_one
+export -f gen_ips
+
+# ===== Ejecuta en paralelo (salida en vivo) =====
+gen_ips | xargs -n1 -P "$CONCURRENCY" -I{} bash -c 'check_one "$@"' _ {}
