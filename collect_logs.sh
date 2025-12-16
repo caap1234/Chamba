@@ -14,6 +14,11 @@ DEST_DIR="${2:-/home/${USER_NAME}/sentinelx_bundle_$(date -u +%F_%H%M%S)}"
 LOGS=(
   "/usr/local/cpanel/logs/access_log"
   "/usr/local/cpanel/logs/error_log"
+
+  # Apache (renombrar para diferenciar)
+  "/usr/local/apache/logs/access_log"
+  "/usr/local/apache/logs/error_log"
+
   "/usr/local/apache/logs/modsec_audit.log"
   "/var/log/exim_mainlog"
   "/var/log/maillog"
@@ -35,9 +40,18 @@ mkdir -p "${DEST_DIR}"
 # -----------------------------
 echo "[*] Copiando logs..."
 for src in "${LOGS[@]}"; do
-  base="$(basename "$src")"
   if [[ -f "$src" ]]; then
-    cp -a "$src" "${DEST_DIR}/${base}"
+    # nombre destino por defecto
+    base="$(basename "$src")"
+    dest_name="$base"
+
+    # renombres para Apache (evitar colisión con cPanel)
+    case "$src" in
+      "/usr/local/apache/logs/access_log") dest_name="apache_access_log" ;;
+      "/usr/local/apache/logs/error_log")  dest_name="apache_error_log" ;;
+    esac
+
+    cp -a "$src" "${DEST_DIR}/${dest_name}"
   else
     echo "WARN: No existe: $src" >&2
   fi
