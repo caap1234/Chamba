@@ -28,7 +28,7 @@ LOGS=(
 )
 
 # Sysstat saXX a procesar
-SA_DAYS=(14 15 16)
+SA_DAYS=(05 06 07)
 
 umask 027
 
