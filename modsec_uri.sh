@@ -2,7 +2,7 @@
 
 LOGFILE="/usr/local/apache/logs/modsec_audit.log"
 
-if [ $# -lt 2 ]; then
+if [ "$#" -lt 2 ]; then
   echo "Uso: $0 <dominio> <URI> [ticket]"
   echo "Ejemplo: $0 kivae.com.mx /wc-api/Openpay_Cards 31705330"
   exit 1
@@ -12,14 +12,17 @@ DOMAIN=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
 TARGET_URI="$2"
 TICKET="${3:-0000000}"
 
+# Elimina puerto y punto final del dominio.
 DOMAIN="${DOMAIN%%:*}"
 DOMAIN="${DOMAIN%.}"
 
+# Asegura que la URI comience con /.
 case "$TARGET_URI" in
   /*) ;;
   *) TARGET_URI="/$TARGET_URI" ;;
 esac
 
+# La búsqueda ignora los parámetros GET.
 TARGET_URI="${TARGET_URI%%\?*}"
 
 if [ ! -f "$LOGFILE" ]; then
@@ -36,26 +39,41 @@ function reset_tx() {
   endpoint=""
   status=""
   msg_count=0
+
   delete rule_ids
   delete severities
 }
 
 function normalize_host(value) {
   value=tolower(value)
+
   gsub(/^[[:space:]]+/, "", value)
   gsub(/[[:space:]]+$/, "", value)
+
   sub(/\r$/, "", value)
   sub(/:[0-9]+$/, "", value)
   sub(/\.$/, "", value)
+
   return value
 }
 
-function escape_regex(value) {
-  gsub(/[][(){}.^$*+?|\\-]/, "\\\\&", value)
-  return value
+function regex_escape(value, out, i, ch) {
+  out=""
+
+  for (i=1; i<=length(value); i++) {
+    ch=substr(value,i,1)
+
+    if (ch ~ /[][(){}.^$*+?|\\-]/) {
+      out=out "\\" ch
+    } else {
+      out=out ch
+    }
+  }
+
+  return out
 }
 
-function flush_tx(   i,key) {
+function flush_tx(i, key) {
   host=normalize_host(host)
 
   if (host != target_domain || endpoint != target_uri) {
@@ -71,6 +89,7 @@ function flush_tx(   i,key) {
 
   for (i=1; i<=msg_count; i++) {
     key=endpoint SUBSEP rule_ids[i] SUBSEP severities[i] SUBSEP status
+
     combo_count[key]++
     rule_count[rule_ids[i]]++
     endpoint_rule[endpoint,rule_ids[i]]=1
@@ -82,10 +101,12 @@ function flush_tx(   i,key) {
 
 BEGIN {
   reset_tx()
+
   inA=0
   inB=0
   inF=0
   inH=0
+
   tx_match_count=0
 }
 
@@ -95,10 +116,12 @@ BEGIN {
   }
 
   reset_tx()
+
   inA=1
   inB=0
   inF=0
   inH=0
+
   next
 }
 
@@ -123,6 +146,7 @@ BEGIN {
   next
 }
 
+# Sección A: IP remota.
 inA && remote_ip == "" {
   n=split($0,a,/[[:space:]]+/)
 
@@ -133,49 +157,80 @@ inA && remote_ip == "" {
   next
 }
 
+# Sección B: línea inicial de la petición HTTP.
 inB && method == "" {
-  if (match($0,/^([A-Z]+)[ \t]+([^ \t]+)[ \t]+HTTP\/[0-9.]+$/,m)) {
-    method=m[1]
-    uri=m[2]
+  request_line=$0
+  sub(/\r$/, "", request_line)
+
+  n=split(request_line,a,/[[:space:]]+/)
+
+  if (n >= 3 && a[1] ~ /^[A-Z]+$/ && a[n] ~ /^HTTP\/[0-9.]+$/) {
+    method=a[1]
+    uri=a[2]
     endpoint=uri
-    sub(/\?.*/,"",endpoint)
+
+    sub(/\?.*/, "", endpoint)
   }
 
   next
 }
 
+# Sección B: encabezado Host.
 inB && tolower($0) ~ /^host:[[:space:]]*/ {
   host=$0
-  sub(/^[^:]+:[[:space:]]*/,"",host)
+
+  sub(/^[^:]+:[[:space:]]*/, "", host)
   host=normalize_host(host)
+
   next
 }
 
+# Sección F: código HTTP de respuesta.
 inF && status == "" {
-  if (match($0,/^HTTP\/[0-9.]+[ \t]+([0-9][0-9][0-9])/,m)) {
-    status=m[1]
+  response_line=$0
+  sub(/\r$/, "", response_line)
+
+  n=split(response_line,a,/[[:space:]]+/)
+
+  if (n >= 2 && a[1] ~ /^HTTP\/[0-9.]+$/ && a[2] ~ /^[0-9][0-9][0-9]$/) {
+    status=a[2]
   }
 
   next
 }
 
+# Sección H: mensajes y reglas activadas.
 inH && /^Message:/ {
   msg_count++
+
   rule_ids[msg_count]="-"
   severities[msg_count]="-"
 
-  if (match($0,/\[id "([^"]+)"\]/,m)) {
-    rule_ids[msg_count]=m[1]
+  line=$0
+
+  if (line ~ /\[id "[^"]+"\]/) {
+    id_value=line
+
+    sub(/^.*\[id "/, "", id_value)
+    sub(/"\].*$/, "", id_value)
+
+    rule_ids[msg_count]=id_value
   }
 
-  if (match($0,/\[severity "([^"]+)"\]/,m)) {
-    severities[msg_count]=m[1]
+  if (line ~ /\[severity "[^"]+"\]/) {
+    severity_value=line
+
+    sub(/^.*\[severity "/, "", severity_value)
+    sub(/"\].*$/, "", severity_value)
+
+    severities[msg_count]=severity_value
   }
 
   next
 }
 
 END {
+  # Procesa una transacción incompleta si el archivo no termina en Z.
   if (remote_ip != "" || host != "" || method != "" || status != "" || msg_count > 0) {
     flush_tx()
   }
@@ -192,6 +247,7 @@ END {
 
   for (k in combo_count) {
     split(k,p,SUBSEP)
+
     endpoint_arr[++n]=p[1]
     rule_arr[n]=p[2]
     sev_arr[n]=p[3]
@@ -231,6 +287,7 @@ END {
 
   print ""
   print "Total por regla:"
+
   printf "%-12s %-8s\n","Rule ID","Veces"
   printf "%-12s %-8s\n","------------","--------"
 
@@ -261,6 +318,7 @@ END {
 
   print ""
   print "IPs que solicitaron la URI:"
+
   printf "%-40s %-8s\n","IP","Veces"
   printf "%-40s %-8s\n","----------------------------------------","--------"
 
@@ -332,8 +390,8 @@ END {
       ctl=ctl "ctl:ruleRemoveById=" list[i]
     }
 
-    ep_rx=escape_regex(ep)
-    domain_rx=escape_regex(target_domain)
+    ep_rx=regex_escape(ep)
+    domain_rx=regex_escape(target_domain)
 
     print "# Disable specific ModSecurity rules for domain and URI"
     print "# ticket " ticket
