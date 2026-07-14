@@ -4,27 +4,22 @@ LOGFILE="/usr/local/apache/logs/modsec_audit.log"
 
 if [ $# -lt 2 ]; then
   echo "Uso: $0 <dominio> <URI> [ticket]"
-  echo "Ejemplo: $0 ejemplo.com /wp-admin/admin-ajax.php 1844933"
+  echo "Ejemplo: $0 kivae.com.mx /wc-api/Openpay_Cards 31705330"
   exit 1
 fi
 
-DOMAIN="${1,,}"
+DOMAIN=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
 TARGET_URI="$2"
 TICKET="${3:-0000000}"
 
-# Normaliza el dominio recibido:
-# - Lo convierte a minúsculas.
-# - Elimina un posible puerto.
-# - Elimina el punto final de un FQDN.
 DOMAIN="${DOMAIN%%:*}"
 DOMAIN="${DOMAIN%.}"
 
-# Asegura que la URI comience con /
-if [[ "$TARGET_URI" != /* ]]; then
-  TARGET_URI="/$TARGET_URI"
-fi
+case "$TARGET_URI" in
+  /*) ;;
+  *) TARGET_URI="/$TARGET_URI" ;;
+esac
 
-# La comparación se realiza sin query string
 TARGET_URI="${TARGET_URI%%\?*}"
 
 if [ ! -f "$LOGFILE" ]; then
@@ -32,10 +27,7 @@ if [ ! -f "$LOGFILE" ]; then
   exit 1
 fi
 
-awk \
-  -v target_domain="$DOMAIN" \
-  -v target_uri="$TARGET_URI" \
-  -v ticket="$TICKET" '
+awk -v target_domain="$DOMAIN" -v target_uri="$TARGET_URI" -v ticket="$TICKET" '
 function reset_tx() {
   remote_ip=""
   host=""
@@ -44,28 +36,26 @@ function reset_tx() {
   endpoint=""
   status=""
   msg_count=0
-
   delete rule_ids
   delete severities
 }
 
 function normalize_host(value) {
   value=tolower(value)
-
-  # Elimina espacios y retorno de carro
-  gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+  gsub(/^[[:space:]]+/, "", value)
+  gsub(/[[:space:]]+$/, "", value)
   sub(/\r$/, "", value)
-
-  # Elimina puerto en dominios IPv4/FQDN
   sub(/:[0-9]+$/, "", value)
-
-  # Elimina punto final del FQDN
   sub(/\.$/, "", value)
-
   return value
 }
 
-function flush_tx(   i, key) {
+function escape_regex(value) {
+  gsub(/[][(){}.^$*+?|\\-]/, "\\\\&", value)
+  return value
+}
+
+function flush_tx(   i,key) {
   host=normalize_host(host)
 
   if (host != target_domain || endpoint != target_uri) {
@@ -73,24 +63,25 @@ function flush_tx(   i, key) {
     return
   }
 
-  for (i=1; i<=msg_count; i++) {
-    key=endpoint SUBSEP rule_ids[i] SUBSEP severities[i] SUBSEP status
+  tx_match_count++
 
-    combo_count[key]++
-    rule_count[rule_ids[i]]++
-    endpoint_rule[endpoint, rule_ids[i]]=1
-    endpoint_seen[endpoint]=1
+  if (remote_ip != "") {
+    ip_count[remote_ip]++
   }
 
-  tx_match_count++
-  ip_count[remote_ip]++
+  for (i=1; i<=msg_count; i++) {
+    key=endpoint SUBSEP rule_ids[i] SUBSEP severities[i] SUBSEP status
+    combo_count[key]++
+    rule_count[rule_ids[i]]++
+    endpoint_rule[endpoint,rule_ids[i]]=1
+    endpoint_seen[endpoint]=1
+  }
 
   reset_tx()
 }
 
 BEGIN {
   reset_tx()
-
   inA=0
   inB=0
   inF=0
@@ -99,23 +90,15 @@ BEGIN {
 }
 
 /^--[^-]+-A--$/ {
-  if (
-    remote_ip != "" ||
-    host != "" ||
-    method != "" ||
-    status != "" ||
-    msg_count > 0
-  ) {
+  if (remote_ip != "" || host != "" || method != "" || status != "" || msg_count > 0) {
     flush_tx()
   }
 
   reset_tx()
-
   inA=1
   inB=0
   inF=0
   inH=0
-
   next
 }
 
@@ -140,9 +123,8 @@ BEGIN {
   next
 }
 
-# Sección A: IP remota
 inA && remote_ip == "" {
-  n=split($0, a, /[[:space:]]+/)
+  n=split($0,a,/[[:space:]]+/)
 
   if (n >= 4) {
     remote_ip=a[4]
@@ -151,57 +133,42 @@ inA && remote_ip == "" {
   next
 }
 
-# Sección B: primera línea de la petición HTTP
 inB && method == "" {
-  if (match(
-    $0,
-    /^([A-Z]+)[ \t]+([^ \t]+)[ \t]+HTTP\/[0-9.]+$/,
-    m
-  )) {
+  if (match($0,/^([A-Z]+)[ \t]+([^ \t]+)[ \t]+HTTP\/[0-9.]+$/,m)) {
     method=m[1]
     uri=m[2]
-
     endpoint=uri
-    sub(/\?.*/, "", endpoint)
+    sub(/\?.*/,"",endpoint)
   }
 
   next
 }
 
-# Sección B: encabezado Host
 inB && tolower($0) ~ /^host:[[:space:]]*/ {
   host=$0
-  sub(/^[^:]+:[[:space:]]*/, "", host)
+  sub(/^[^:]+:[[:space:]]*/,"",host)
   host=normalize_host(host)
-
   next
 }
 
-# Sección F: código HTTP de respuesta
 inF && status == "" {
-  if (match(
-    $0,
-    /^HTTP\/[0-9.]+[ \t]+([0-9]{3})/,
-    m
-  )) {
+  if (match($0,/^HTTP\/[0-9.]+[ \t]+([0-9][0-9][0-9])/,m)) {
     status=m[1]
   }
 
   next
 }
 
-# Sección H: reglas activadas
 inH && /^Message:/ {
   msg_count++
-
   rule_ids[msg_count]="-"
   severities[msg_count]="-"
 
-  if (match($0, /\[id "([^"]+)"\]/, m)) {
+  if (match($0,/\[id "([^"]+)"\]/,m)) {
     rule_ids[msg_count]=m[1]
   }
 
-  if (match($0, /\[severity "([^"]+)"\]/, m)) {
+  if (match($0,/\[severity "([^"]+)"\]/,m)) {
     severities[msg_count]=m[1]
   }
 
@@ -209,14 +176,7 @@ inH && /^Message:/ {
 }
 
 END {
-  # Procesa una transacción incompleta si el archivo no termina en Z
-  if (
-    remote_ip != "" ||
-    host != "" ||
-    method != "" ||
-    status != "" ||
-    msg_count > 0
-  ) {
+  if (remote_ip != "" || host != "" || method != "" || status != "" || msg_count > 0) {
     flush_tx()
   }
 
@@ -225,25 +185,13 @@ END {
   print "Transacciones encontradas: " tx_match_count
   print ""
 
-  printf "%-50s %-12s %-10s %-8s %-8s\n",
-    "Endpoint",
-    "Rule ID",
-    "Severity",
-    "Status",
-    "Veces"
-
-  printf "%-50s %-12s %-10s %-8s %-8s\n",
-    "--------------------------------------------------",
-    "------------",
-    "----------",
-    "--------",
-    "--------"
+  printf "%-50s %-12s %-10s %-8s %-8s\n","Endpoint","Rule ID","Severity","Status","Veces"
+  printf "%-50s %-12s %-10s %-8s %-8s\n","--------------------------------------------------","------------","----------","--------","--------"
 
   n=0
 
   for (k in combo_count) {
-    split(k, p, SUBSEP)
-
+    split(k,p,SUBSEP)
     endpoint_arr[++n]=p[1]
     rule_arr[n]=p[2]
     sev_arr[n]=p[3]
@@ -253,13 +201,7 @@ END {
 
   for (i=1; i<=n; i++) {
     for (j=i+1; j<=n; j++) {
-      if (
-        endpoint_arr[i] > endpoint_arr[j] ||
-        (
-          endpoint_arr[i] == endpoint_arr[j] &&
-          rule_arr[i] > rule_arr[j]
-        )
-      ) {
+      if (endpoint_arr[i] > endpoint_arr[j] || (endpoint_arr[i] == endpoint_arr[j] && rule_arr[i] > rule_arr[j])) {
         tmp=endpoint_arr[i]
         endpoint_arr[i]=endpoint_arr[j]
         endpoint_arr[j]=tmp
@@ -284,19 +226,13 @@ END {
   }
 
   for (i=1; i<=n; i++) {
-    printf "%-50s %-12s %-10s %-8s %-8s\n",
-      endpoint_arr[i],
-      rule_arr[i],
-      sev_arr[i],
-      stat_arr[i],
-      count_arr[i]
+    printf "%-50s %-12s %-10s %-8s %-8s\n",endpoint_arr[i],rule_arr[i],sev_arr[i],stat_arr[i],count_arr[i]
   }
 
   print ""
   print "Total por regla:"
-
-  printf "%-12s %-8s\n", "Rule ID", "Veces"
-  printf "%-12s %-8s\n", "------------", "--------"
+  printf "%-12s %-8s\n","Rule ID","Veces"
+  printf "%-12s %-8s\n","------------","--------"
 
   nr=0
 
@@ -320,14 +256,13 @@ END {
   }
 
   for (i=1; i<=nr; i++) {
-    printf "%-12s %-8s\n", rid[i], rcount[i]
+    printf "%-12s %-8s\n",rid[i],rcount[i]
   }
 
   print ""
   print "IPs que solicitaron la URI:"
-
-  printf "%-40s %-8s\n", "IP", "Veces"
-  printf "%-40s %-8s\n", "----------------------------------------", "--------"
+  printf "%-40s %-8s\n","IP","Veces"
+  printf "%-40s %-8s\n","----------------------------------------","--------"
 
   nip=0
 
@@ -351,18 +286,25 @@ END {
   }
 
   for (i=1; i<=nip; i++) {
-    printf "%-40s %-8s\n", ips[i], ipcounts[i]
+    printf "%-40s %-8s\n",ips[i],ipcounts[i]
   }
 
   print ""
   print "Regla sugerida para dominio y URI:"
+
+  if (tx_match_count == 0) {
+    print "No se encontraron transacciones que coincidan con:"
+    print "  Host: " target_domain
+    print "  URI:  " target_uri
+    exit
+  }
 
   for (ep in endpoint_seen) {
     delete list
     c=0
 
     for (k in endpoint_rule) {
-      split(k, p, SUBSEP)
+      split(k,p,SUBSEP)
 
       if (p[1] == ep && p[2] != "-") {
         c++
@@ -372,7 +314,7 @@ END {
 
     for (i=1; i<=c; i++) {
       for (j=i+1; j<=c; j++) {
-        if ((list[i] + 0) > (list[j] + 0)) {
+        if ((list[i]+0) > (list[j]+0)) {
           tmp=list[i]
           list[i]=list[j]
           list[j]=tmp
@@ -390,34 +332,20 @@ END {
       ctl=ctl "ctl:ruleRemoveById=" list[i]
     }
 
-    ep_rx=ep
-    domain_rx=target_domain
-
-    gsub(/\\/, "\\\\", ep_rx)
-    gsub(/\//, "\\/", ep_rx)
-    gsub(/\./, "\\.", ep_rx)
-    gsub(/\+/, "\\+", ep_rx)
-    gsub(/\-/, "\\-", ep_rx)
-    gsub(/\?/, "\\?", ep_rx)
-    gsub(/\(/, "\\(", ep_rx)
-    gsub(/\)/, "\\)", ep_rx)
-    gsub(/\[/, "\\[", ep_rx)
-    gsub(/\]/, "\\]", ep_rx)
-
-    gsub(/\./, "\\.", domain_rx)
-    gsub(/\-/, "\\-", domain_rx)
+    ep_rx=escape_regex(ep)
+    domain_rx=escape_regex(target_domain)
 
     print "# Disable specific ModSecurity rules for domain and URI"
     print "# ticket " ticket
     print "SecRule REQUEST_HEADERS:Host \"@rx ^" domain_rx "(:[0-9]+)?$\" \"id:20000120,phase:1,nolog,pass,chain\""
-    print "    SecRule REQUEST_URI \"@rx ^" ep_rx "(\\?.*)?$\" \"t:none," ctl "\""
-    print ""
-  }
 
-  if (tx_match_count == 0) {
-    print "No se encontraron transacciones que coincidan con:"
-    print "  Host: " target_domain
-    print "  URI:  " target_uri
+    if (ctl != "") {
+      print "    SecRule REQUEST_URI \"@rx ^" ep_rx "(\\?.*)?$\" \"t:none," ctl "\""
+    } else {
+      print "    SecRule REQUEST_URI \"@rx ^" ep_rx "(\\?.*)?$\" \"t:none\""
+    }
+
+    print ""
   }
 }
 ' "$LOGFILE"
