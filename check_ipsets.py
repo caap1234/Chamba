@@ -6,6 +6,11 @@ import bisect
 import sys
 
 
+EXCLUDED_IPSETS = {
+    "i360.ipv4.whitelist.static",
+}
+
+
 SOURCES = {
     "Googlebot": {
         "type": "json",
@@ -28,7 +33,6 @@ SOURCES = {
         "ranges": [
             "160.79.104.0/23",
             "160.79.104.0/21",
-            "2607:6bc0::/48",
         ],
     },
 }
@@ -53,34 +57,47 @@ def load_bot_ranges(bot_name):
     if source["type"] == "static":
         for cidr in source["ranges"]:
             try:
-                ranges.append(
-                    ipaddress.ip_network(cidr, strict=False)
+                network = ipaddress.ip_network(
+                    cidr,
+                    strict=False
                 )
+
+                if network.version == 4:
+                    ranges.append(network)
+
             except ValueError:
                 pass
 
         return ranges
 
     try:
-        data = download_json(source["url"])
+        data = download_json(
+            source["url"]
+        )
 
     except Exception as e:
-        print(f"[ERROR] No se pudo obtener {bot_name}: {e}")
+        print(
+            f"[ERROR] No se pudo obtener "
+            f"{bot_name}: {e}"
+        )
         return []
 
     for prefix in data.get("prefixes", []):
-        cidr = (
-            prefix.get("ipv4Prefix")
-            or prefix.get("ipv6Prefix")
-        )
+
+        cidr = prefix.get("ipv4Prefix")
 
         if not cidr:
             continue
 
         try:
-            ranges.append(
-                ipaddress.ip_network(cidr, strict=False)
+            network = ipaddress.ip_network(
+                cidr,
+                strict=False
             )
+
+            if network.version == 4:
+                ranges.append(network)
+
         except ValueError:
             pass
 
@@ -96,12 +113,16 @@ def get_ipsets():
         )
 
     except Exception as e:
-        print(f"[ERROR] No se pudo ejecutar ipset save: {e}")
+        print(
+            f"[ERROR] No se pudo ejecutar "
+            f"ipset save: {e}"
+        )
         sys.exit(1)
 
     entries = []
 
     for line in output.splitlines():
+
         if not line.startswith("add "):
             continue
 
@@ -111,6 +132,10 @@ def get_ipsets():
             continue
 
         ipset_name = parts[1]
+
+        if ipset_name in EXCLUDED_IPSETS:
+            continue
+
         entry_raw = parts[2]
 
         # Soporta:
@@ -120,28 +145,37 @@ def get_ipsets():
         # 1.2.3.0/24,tcp:443
         entry = entry_raw.split(",")[0]
 
+        # Ignorar IPv6 inmediatamente
+        if ":" in entry:
+            continue
+
         try:
+
             if "/" in entry:
+
                 network = ipaddress.ip_network(
                     entry,
                     strict=False
                 )
 
             else:
-                address = ipaddress.ip_address(entry)
 
-                prefix = (
-                    32
-                    if address.version == 4
-                    else 128
+                address = ipaddress.ip_address(
+                    entry
                 )
 
+                if address.version != 4:
+                    continue
+
                 network = ipaddress.ip_network(
-                    f"{entry}/{prefix}",
+                    f"{entry}/32",
                     strict=False
                 )
 
         except ValueError:
+            continue
+
+        if network.version != 4:
             continue
 
         entries.append({
@@ -158,38 +192,32 @@ def build_indexes(search_groups):
 
     for bot, ranges in search_groups.items():
 
-        indexes[bot] = {}
+        intervals = []
 
-        for version in (4, 6):
+        for network in ranges:
 
-            intervals = []
+            if network.version != 4:
+                continue
 
-            for network in ranges:
-
-                if network.version != version:
-                    continue
-
-                intervals.append(
-                    (
-                        int(network.network_address),
-                        int(network.broadcast_address),
-                        str(network)
-                    )
+            intervals.append(
+                (
+                    int(network.network_address),
+                    int(network.broadcast_address),
+                    str(network)
                 )
-
-            intervals.sort(
-                key=lambda x: x[0]
             )
 
-            starts = [
+        intervals.sort(
+            key=lambda x: x[0]
+        )
+
+        indexes[bot] = {
+            "intervals": intervals,
+            "starts": [
                 item[0]
                 for item in intervals
             ]
-
-            indexes[bot][version] = {
-                "intervals": intervals,
-                "starts": starts
-            }
+        }
 
     return indexes
 
@@ -209,8 +237,6 @@ def find_overlap(candidate, index):
         candidate.broadcast_address
     )
 
-    # Busca únicamente hasta el último rango cuyo inicio
-    # pueda caer antes del final del candidato.
     pos = bisect.bisect_right(
         starts,
         candidate_end
@@ -236,7 +262,10 @@ def find_overlap(candidate, index):
     return None
 
 
-def search_ranges(search_groups, ipset_entries):
+def search_ranges(
+    search_groups,
+    ipset_entries
+):
     matches = []
 
     indexes = build_indexes(
@@ -252,18 +281,11 @@ def search_ranges(search_groups, ipset_entries):
 
         candidate = item["network"]
 
-        for bot, versions in indexes.items():
-
-            version_index = versions.get(
-                candidate.version
-            )
-
-            if not version_index:
-                continue
+        for bot, index in indexes.items():
 
             official_range = find_overlap(
                 candidate,
-                version_index
+                index
             )
 
             if official_range:
@@ -275,11 +297,11 @@ def search_ranges(search_groups, ipset_entries):
                     "entry": item["entry_raw"],
                 })
 
-        # Progreso cada 100,000 entradas
         if counter % 100000 == 0:
             print(
                 f"  Procesadas "
-                f"{counter:,} / {total:,} entradas..."
+                f"{counter:,} / "
+                f"{total:,} entradas..."
             )
 
     return matches
@@ -288,7 +310,9 @@ def search_ranges(search_groups, ipset_entries):
 def print_results(matches):
     if not matches:
         print()
-        print("No se encontraron coincidencias.")
+        print(
+            "No se encontraron coincidencias."
+        )
         return
 
     matches.sort(
@@ -328,12 +352,18 @@ def print_results(matches):
 
 def manual_ranges():
     print()
-    print("Ingresa una o varias IPs/rangos CIDR.")
+    print(
+        "Ingresa una o varias "
+        "IPs/rangos IPv4."
+    )
     print()
     print("Ejemplos:")
     print("  66.249.66.203")
     print("  66.249.64.0/19")
-    print("  40.77.167.0/24, 52.167.144.0/24")
+    print(
+        "  40.77.167.0/24, "
+        "52.167.144.0/24"
+    )
     print()
 
     raw = input(
@@ -345,6 +375,13 @@ def manual_ranges():
     networks = []
 
     for value in raw.split():
+
+        if ":" in value:
+            print(
+                f"[AVISO] IPv6 ignorada: "
+                f"{value}"
+            )
+            continue
 
         try:
 
@@ -361,56 +398,51 @@ def manual_ranges():
                     value
                 )
 
-                prefix = (
-                    32
-                    if address.version == 4
-                    else 128
-                )
+                if address.version != 4:
+                    continue
 
                 network = ipaddress.ip_network(
-                    f"{value}/{prefix}",
+                    f"{value}/32",
                     strict=False
                 )
 
-            networks.append(network)
+            if network.version == 4:
+                networks.append(network)
 
         except ValueError:
 
             print(
-                f"[AVISO] Valor inválido ignorado: "
-                f"{value}"
+                f"[AVISO] Valor inválido "
+                f"ignorado: {value}"
             )
 
     return networks
 
 
-def show_loaded_ranges(search_groups):
+def show_loaded_ranges(
+    search_groups
+):
     print()
 
     for name, ranges in search_groups.items():
 
-        ipv4 = sum(
-            1 for r in ranges
-            if r.version == 4
-        )
-
-        ipv6 = sum(
-            1 for r in ranges
-            if r.version == 6
-        )
-
         print(
             f"{name}: "
-            f"{len(ranges)} rangos "
-            f"(IPv4: {ipv4}, IPv6: {ipv6})"
+            f"{len(ranges)} rangos IPv4"
         )
 
 
 def main():
     print()
-    print("==============================================")
-    print("   Buscador de rangos de bots en IPSET")
-    print("==============================================")
+    print(
+        "=============================================="
+    )
+    print(
+        "   Buscador de rangos IPv4 de bots en IPSET"
+    )
+    print(
+        "=============================================="
+    )
     print()
 
     bots = list(
@@ -429,7 +461,8 @@ def main():
     option_manual = len(bots) + 2
 
     print(
-        f"{option_all}) Todos los bots"
+        f"{option_all}) "
+        "Todos los bots"
     )
 
     print(
@@ -447,7 +480,9 @@ def main():
         )
 
     except ValueError:
-        print("Opción inválida.")
+        print(
+            "Opción inválida."
+        )
         return
 
     search_groups = {}
@@ -460,7 +495,8 @@ def main():
 
         print()
         print(
-            f"Cargando rangos de {bot}..."
+            f"Cargando rangos IPv4 "
+            f"de {bot}..."
         )
 
         ranges = load_bot_ranges(
@@ -469,7 +505,8 @@ def main():
 
         if not ranges:
             print(
-                "No se obtuvieron rangos."
+                "No se obtuvieron "
+                "rangos IPv4."
             )
             return
 
@@ -479,7 +516,8 @@ def main():
 
         print()
         print(
-            "Cargando rangos de todos los bots..."
+            "Cargando rangos IPv4 "
+            "de todos los bots..."
         )
 
         for bot in bots:
@@ -489,12 +527,15 @@ def main():
             )
 
             if ranges:
+
                 search_groups[bot] = ranges
 
             else:
+
                 print(
                     f"[AVISO] {bot}: "
-                    "no se obtuvieron rangos"
+                    "no se obtuvieron "
+                    "rangos IPv4"
                 )
 
     elif option == option_manual:
@@ -505,7 +546,7 @@ def main():
 
             print(
                 "No se proporcionaron "
-                "rangos válidos."
+                "rangos IPv4 válidos."
             )
 
             return
@@ -513,7 +554,10 @@ def main():
         search_groups["Manual"] = ranges
 
     else:
-        print("Opción inválida.")
+
+        print(
+            "Opción inválida."
+        )
         return
 
     show_loaded_ranges(
@@ -521,22 +565,28 @@ def main():
     )
 
     print()
-    print("Leyendo IPSET...")
+    print(
+        "Leyendo IPSET..."
+    )
 
     ipset_entries = get_ipsets()
 
     print(
-        f"Entradas IPSET analizables: "
+        f"Entradas IPv4 analizables: "
         f"{len(ipset_entries):,}"
+    )
+
+    print(
+        "IPSET excluido: "
+        "i360.ipv4.whitelist.static"
     )
 
     if not ipset_entries:
 
         print(
             "No se encontraron "
-            "entradas analizables."
+            "entradas IPv4 analizables."
         )
-
         return
 
     print()
