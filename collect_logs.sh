@@ -1,94 +1,562 @@
-#!/usr/bin/env bash
-set -euo pipefail
+import subprocess
+import urllib.request
+import json
+import ipaddress
+import bisect
+import sys
 
-# Uso:
-#   sudo bash collect_logs.sh <usuario> [directorio_destino]
-# Ejemplo:
-#   sudo bash collect_logs.sh cuceicom
-#   sudo bash collect_logs.sh cuceicom /home/cuceicom/sentinelx_bundle_$(date +%F)
 
-USER_NAME="${1:-user}"
-DEST_DIR="${2:-/home/${USER_NAME}/sentinelx_bundle_$(date -u +%F_%H%M%S)}"
+SOURCES = {
+    "Googlebot": {
+        "type": "json",
+        "url": "https://developers.google.com/static/crawling/ipranges/common-crawlers.json",
+    },
+    "Bingbot": {
+        "type": "json",
+        "url": "https://www.bing.com/toolbox/bingbot.json",
+    },
+    "PerplexityBot": {
+        "type": "json",
+        "url": "https://www.perplexity.com/perplexitybot.json",
+    },
+    "GPTBot": {
+        "type": "json",
+        "url": "https://openai.com/gptbot.json",
+    },
+    "Anthropic": {
+        "type": "static",
+        "ranges": [
+            "160.79.104.0/23",
+            "160.79.104.0/21",
+            "2607:6bc0::/48",
+        ],
+    },
+}
 
-# Logs a copiar
-LOGS=(
-  "/usr/local/cpanel/logs/access_log"
-  "/usr/local/cpanel/logs/error_log"
 
-  # Apache (renombrar para diferenciar)
-  "/usr/local/apache/logs/access_log"
-  "/usr/local/apache/logs/error_log"
+def download_json(url):
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0"
+        }
+    )
 
-  "/usr/local/apache/logs/modsec_audit.log"
-  "/var/log/exim_mainlog"
-  "/var/log/maillog"
-  "/var/log/messages"
-  "/var/log/lfd.log"
-  "/var/log/secure"
-)
+    with urllib.request.urlopen(req, timeout=30) as response:
+        return json.load(response)
 
-# Sysstat saXX a procesar
-SA_DAYS=(05 06 07)
 
-umask 027
+def load_bot_ranges(bot_name):
+    source = SOURCES[bot_name]
+    ranges = []
 
-echo "[*] Destino: ${DEST_DIR}"
-mkdir -p "${DEST_DIR}"
+    if source["type"] == "static":
+        for cidr in source["ranges"]:
+            try:
+                ranges.append(
+                    ipaddress.ip_network(cidr, strict=False)
+                )
+            except ValueError:
+                pass
 
-# -----------------------------
-# Copia de logs (preserva permisos/fechas si existen)
-# -----------------------------
-echo "[*] Copiando logs..."
-for src in "${LOGS[@]}"; do
-  if [[ -f "$src" ]]; then
-    # nombre destino por defecto
-    base="$(basename "$src")"
-    dest_name="$base"
+        return ranges
 
-    # renombres para Apache (evitar colisión con cPanel)
-    case "$src" in
-      "/usr/local/apache/logs/access_log") dest_name="apache_access_log" ;;
-      "/usr/local/apache/logs/error_log")  dest_name="apache_error_log" ;;
-    esac
+    try:
+        data = download_json(source["url"])
 
-    cp -a "$src" "${DEST_DIR}/${dest_name}"
-  else
-    echo "WARN: No existe: $src" >&2
-  fi
-done
+    except Exception as e:
+        print(f"[ERROR] No se pudo obtener {bot_name}: {e}")
+        return []
 
-# -----------------------------
-# SAR: -q -r -d para sa14 sa15 sa16
-# -----------------------------
-echo "[*] Generando SAR..."
-for day in "${SA_DAYS[@]}"; do
-  sa_file="/var/log/sa/sa${day}"
-  if [[ ! -f "$sa_file" ]]; then
-    echo "WARN: No existe: $sa_file (¿sysstat instalado y habilitado?)" >&2
-    continue
-  fi
+    for prefix in data.get("prefixes", []):
+        cidr = (
+            prefix.get("ipv4Prefix")
+            or prefix.get("ipv6Prefix")
+        )
 
-  # Fecha real del archivo saXX (usando mtime en UTC)
-  sar_date="$(date -u -r "$sa_file" +%F)"
+        if not cidr:
+            continue
 
-  for mode in q r d; do
-    out="${DEST_DIR}/sar_sa${day}_${mode}.txt"
-    {
-      echo "SAR_DATE=${sar_date}"
-      echo "SAR_FILE=${sa_file}"
-      echo "SAR_MODE=-${mode}"
-      echo "GENERATED_AT_UTC=$(date -u +%F\ %T)"
-      echo "----------------------------------------"
-      sar -f "$sa_file" "-${mode}"
-    } > "$out"
-  done
-done
+        try:
+            ranges.append(
+                ipaddress.ip_network(cidr, strict=False)
+            )
+        except ValueError:
+            pass
 
-# -----------------------------
-# Ownership final
-# -----------------------------
-echo "[*] Ajustando ownership a ${USER_NAME}:${USER_NAME} ..."
-chown -R "${USER_NAME}:${USER_NAME}" "${DEST_DIR}"
+    return ranges
 
-echo "[OK] Listo. Archivos en: ${DEST_DIR}"
-ls -lah "${DEST_DIR}"
+
+def get_ipsets():
+    try:
+        output = subprocess.check_output(
+            ["ipset", "save"],
+            text=True,
+            stderr=subprocess.DEVNULL
+        )
+
+    except Exception as e:
+        print(f"[ERROR] No se pudo ejecutar ipset save: {e}")
+        sys.exit(1)
+
+    entries = []
+
+    for line in output.splitlines():
+        if not line.startswith("add "):
+            continue
+
+        parts = line.split()
+
+        if len(parts) < 3:
+            continue
+
+        ipset_name = parts[1]
+        entry_raw = parts[2]
+
+        # Soporta:
+        # 1.2.3.4
+        # 1.2.3.0/24
+        # 1.2.3.4,tcp:80
+        # 1.2.3.0/24,tcp:443
+        entry = entry_raw.split(",")[0]
+
+        try:
+            if "/" in entry:
+                network = ipaddress.ip_network(
+                    entry,
+                    strict=False
+                )
+
+            else:
+                address = ipaddress.ip_address(entry)
+
+                prefix = (
+                    32
+                    if address.version == 4
+                    else 128
+                )
+
+                network = ipaddress.ip_network(
+                    f"{entry}/{prefix}",
+                    strict=False
+                )
+
+        except ValueError:
+            continue
+
+        entries.append({
+            "ipset": ipset_name,
+            "entry_raw": entry_raw,
+            "network": network,
+        })
+
+    return entries
+
+
+def build_indexes(search_groups):
+    indexes = {}
+
+    for bot, ranges in search_groups.items():
+
+        indexes[bot] = {}
+
+        for version in (4, 6):
+
+            intervals = []
+
+            for network in ranges:
+
+                if network.version != version:
+                    continue
+
+                intervals.append(
+                    (
+                        int(network.network_address),
+                        int(network.broadcast_address),
+                        str(network)
+                    )
+                )
+
+            intervals.sort(
+                key=lambda x: x[0]
+            )
+
+            starts = [
+                item[0]
+                for item in intervals
+            ]
+
+            indexes[bot][version] = {
+                "intervals": intervals,
+                "starts": starts
+            }
+
+    return indexes
+
+
+def find_overlap(candidate, index):
+    intervals = index["intervals"]
+    starts = index["starts"]
+
+    if not intervals:
+        return None
+
+    candidate_start = int(
+        candidate.network_address
+    )
+
+    candidate_end = int(
+        candidate.broadcast_address
+    )
+
+    # Busca únicamente hasta el último rango cuyo inicio
+    # pueda caer antes del final del candidato.
+    pos = bisect.bisect_right(
+        starts,
+        candidate_end
+    )
+
+    i = pos - 1
+
+    while i >= 0:
+
+        start, end, cidr = intervals[i]
+
+        if end < candidate_start:
+            break
+
+        if (
+            start <= candidate_end
+            and end >= candidate_start
+        ):
+            return cidr
+
+        i -= 1
+
+    return None
+
+
+def search_ranges(search_groups, ipset_entries):
+    matches = []
+
+    indexes = build_indexes(
+        search_groups
+    )
+
+    total = len(ipset_entries)
+
+    for counter, item in enumerate(
+        ipset_entries,
+        start=1
+    ):
+
+        candidate = item["network"]
+
+        for bot, versions in indexes.items():
+
+            version_index = versions.get(
+                candidate.version
+            )
+
+            if not version_index:
+                continue
+
+            official_range = find_overlap(
+                candidate,
+                version_index
+            )
+
+            if official_range:
+
+                matches.append({
+                    "bot": bot,
+                    "range": official_range,
+                    "ipset": item["ipset"],
+                    "entry": item["entry_raw"],
+                })
+
+        # Progreso cada 100,000 entradas
+        if counter % 100000 == 0:
+            print(
+                f"  Procesadas "
+                f"{counter:,} / {total:,} entradas..."
+            )
+
+    return matches
+
+
+def print_results(matches):
+    if not matches:
+        print()
+        print("No se encontraron coincidencias.")
+        return
+
+    matches.sort(
+        key=lambda x: (
+            x["bot"],
+            x["range"],
+            x["ipset"],
+            x["entry"],
+        )
+    )
+
+    print()
+    print(
+        f"{'BOT / GRUPO':<18} "
+        f"{'RANGO BOT':<28} "
+        f"{'IPSET':<45} "
+        f"{'ENTRADA IPSET'}"
+    )
+
+    print("-" * 140)
+
+    for match in matches:
+
+        print(
+            f"{match['bot']:<18} "
+            f"{match['range']:<28} "
+            f"{match['ipset']:<45} "
+            f"{match['entry']}"
+        )
+
+    print()
+    print(
+        f"Total de coincidencias: "
+        f"{len(matches)}"
+    )
+
+
+def manual_ranges():
+    print()
+    print("Ingresa una o varias IPs/rangos CIDR.")
+    print()
+    print("Ejemplos:")
+    print("  66.249.66.203")
+    print("  66.249.64.0/19")
+    print("  40.77.167.0/24, 52.167.144.0/24")
+    print()
+
+    raw = input(
+        "IPs/Rangos: "
+    ).strip()
+
+    raw = raw.replace(",", " ")
+
+    networks = []
+
+    for value in raw.split():
+
+        try:
+
+            if "/" in value:
+
+                network = ipaddress.ip_network(
+                    value,
+                    strict=False
+                )
+
+            else:
+
+                address = ipaddress.ip_address(
+                    value
+                )
+
+                prefix = (
+                    32
+                    if address.version == 4
+                    else 128
+                )
+
+                network = ipaddress.ip_network(
+                    f"{value}/{prefix}",
+                    strict=False
+                )
+
+            networks.append(network)
+
+        except ValueError:
+
+            print(
+                f"[AVISO] Valor inválido ignorado: "
+                f"{value}"
+            )
+
+    return networks
+
+
+def show_loaded_ranges(search_groups):
+    print()
+
+    for name, ranges in search_groups.items():
+
+        ipv4 = sum(
+            1 for r in ranges
+            if r.version == 4
+        )
+
+        ipv6 = sum(
+            1 for r in ranges
+            if r.version == 6
+        )
+
+        print(
+            f"{name}: "
+            f"{len(ranges)} rangos "
+            f"(IPv4: {ipv4}, IPv6: {ipv6})"
+        )
+
+
+def main():
+    print()
+    print("==============================================")
+    print("   Buscador de rangos de bots en IPSET")
+    print("==============================================")
+    print()
+
+    bots = list(
+        SOURCES.keys()
+    )
+
+    for index, bot in enumerate(
+        bots,
+        start=1
+    ):
+        print(
+            f"{index}) {bot}"
+        )
+
+    option_all = len(bots) + 1
+    option_manual = len(bots) + 2
+
+    print(
+        f"{option_all}) Todos los bots"
+    )
+
+    print(
+        f"{option_manual}) "
+        "Introducir IPs/rangos manualmente"
+    )
+
+    print()
+
+    try:
+        option = int(
+            input(
+                "Selecciona una opción: "
+            )
+        )
+
+    except ValueError:
+        print("Opción inválida.")
+        return
+
+    search_groups = {}
+
+    if 1 <= option <= len(bots):
+
+        bot = bots[
+            option - 1
+        ]
+
+        print()
+        print(
+            f"Cargando rangos de {bot}..."
+        )
+
+        ranges = load_bot_ranges(
+            bot
+        )
+
+        if not ranges:
+            print(
+                "No se obtuvieron rangos."
+            )
+            return
+
+        search_groups[bot] = ranges
+
+    elif option == option_all:
+
+        print()
+        print(
+            "Cargando rangos de todos los bots..."
+        )
+
+        for bot in bots:
+
+            ranges = load_bot_ranges(
+                bot
+            )
+
+            if ranges:
+                search_groups[bot] = ranges
+
+            else:
+                print(
+                    f"[AVISO] {bot}: "
+                    "no se obtuvieron rangos"
+                )
+
+    elif option == option_manual:
+
+        ranges = manual_ranges()
+
+        if not ranges:
+
+            print(
+                "No se proporcionaron "
+                "rangos válidos."
+            )
+
+            return
+
+        search_groups["Manual"] = ranges
+
+    else:
+        print("Opción inválida.")
+        return
+
+    show_loaded_ranges(
+        search_groups
+    )
+
+    print()
+    print("Leyendo IPSET...")
+
+    ipset_entries = get_ipsets()
+
+    print(
+        f"Entradas IPSET analizables: "
+        f"{len(ipset_entries):,}"
+    )
+
+    if not ipset_entries:
+
+        print(
+            "No se encontraron "
+            "entradas analizables."
+        )
+
+        return
+
+    print()
+    print(
+        "Construyendo índices..."
+    )
+
+    print(
+        "Buscando coincidencias..."
+    )
+
+    matches = search_ranges(
+        search_groups,
+        ipset_entries
+    )
+
+    print_results(
+        matches
+    )
+
+
+if __name__ == "__main__":
+    main()
