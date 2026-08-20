@@ -74,7 +74,20 @@ SOURCES = {
             "104.47.0.0/17",
         ],
     },
+    "Cloudflare": {
+        "type": "text",
+        "url": "https://www.cloudflare.com/ips-v4/",
+    },
 }
+
+
+ALL_BOTS = [
+    "Googlebot",
+    "Bingbot",
+    "PerplexityBot",
+    "GPTBot",
+    "Anthropic",
+]
 
 
 def download_json(url):
@@ -89,12 +102,57 @@ def download_json(url):
         return json.load(response)
 
 
+def download_text(url):
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0"
+        }
+    )
+
+    with urllib.request.urlopen(req, timeout=30) as response:
+        return response.read().decode("utf-8")
+
+
 def load_bot_ranges(bot_name):
     source = SOURCES[bot_name]
     ranges = []
 
     if source["type"] == "static":
         for cidr in source["ranges"]:
+            try:
+                network = ipaddress.ip_network(
+                    cidr,
+                    strict=False
+                )
+
+                if network.version == 4:
+                    ranges.append(network)
+
+            except ValueError:
+                pass
+
+        return ranges
+
+    if source["type"] == "text":
+        try:
+            data = download_text(
+                source["url"]
+            )
+
+        except Exception as e:
+            print(
+                f"[ERROR] No se pudo obtener "
+                f"{bot_name}: {e}"
+            )
+            return []
+
+        for cidr in data.splitlines():
+            cidr = cidr.strip()
+
+            if not cidr:
+                continue
+
             try:
                 network = ipaddress.ip_network(
                     cidr,
@@ -559,7 +617,7 @@ def main():
             "de todos los bots..."
         )
 
-        for bot in bots:
+        for bot in ALL_BOTS:
 
             ranges = load_bot_ranges(
                 bot
