@@ -4,6 +4,9 @@ import json
 import ipaddress
 import bisect
 import sys
+import os
+import socket
+from datetime import datetime
 
 
 EXCLUDED_IPSETS = {
@@ -447,6 +450,96 @@ def print_results(matches):
     )
 
 
+
+def export_results_txt(matches):
+    if not matches:
+        return None, None
+
+    output_dir = "/var/www/html"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"coincidencias_ipset_{timestamp}.txt"
+    filepath = os.path.join(output_dir, filename)
+
+    matches_sorted = sorted(
+        matches,
+        key=lambda x: (
+            x["bot"],
+            x["range"],
+            x["ipset"],
+            x["entry"],
+        )
+    )
+
+    lines = []
+    lines.append(
+        f"{'BOT / GRUPO':<18} "
+        f"{'RANGO BOT':<28} "
+        f"{'IPSET':<45} "
+        f"{'ENTRADA IPSET'}"
+    )
+    lines.append("-" * 140)
+
+    for match in matches_sorted:
+        lines.append(
+            f"{match['bot']:<18} "
+            f"{match['range']:<28} "
+            f"{match['ipset']:<45} "
+            f"{match['entry']}"
+        )
+
+    lines.append("")
+    lines.append(
+        f"Total de coincidencias: {len(matches_sorted)}"
+    )
+    lines.append("")
+
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+
+        os.chmod(filepath, 0o644)
+
+    except PermissionError:
+        print()
+        print(
+            f"[ERROR] Sin permisos para escribir en {output_dir}."
+        )
+        print(
+            "Ejecuta el script con permisos suficientes "
+            "o ajusta los permisos del directorio."
+        )
+        return None, None
+
+    except Exception as e:
+        print()
+        print(
+            f"[ERROR] No se pudo exportar el TXT: {e}"
+        )
+        return None, None
+
+    # Si defines SERVER_HTTP_HOST, se usará ese dominio/IP para construir
+    # el enlace. Ejemplo:
+    # SERVER_HTTP_HOST=midominio.com python3 script.py
+    http_host = os.environ.get("SERVER_HTTP_HOST", "").strip()
+
+    if not http_host:
+        try:
+            http_host = socket.gethostbyname(socket.gethostname())
+        except Exception:
+            http_host = ""
+
+    if http_host and not http_host.startswith(("http://", "https://")):
+        url = f"http://{http_host}/{filename}"
+    elif http_host:
+        url = f"{http_host.rstrip('/')}/{filename}"
+    else:
+        url = f"http://IP_DEL_SERVIDOR/{filename}"
+
+    return filepath, url
+
+
 def manual_ranges():
     print()
     print(
@@ -703,6 +796,23 @@ def main():
     print_results(
         matches
     )
+
+    if matches:
+        filepath, url = export_results_txt(
+            matches
+        )
+
+        if filepath:
+            print()
+            print(
+                f"Resultados exportados a: {filepath}"
+            )
+            print(
+                "Permisos aplicados: 644"
+            )
+            print(
+                f"Enlace de descarga: {url}"
+            )
 
 
 if __name__ == "__main__":
