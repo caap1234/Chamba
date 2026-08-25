@@ -19,18 +19,22 @@ SOURCES = {
         "type": "json",
         "url": "https://developers.google.com/static/crawling/ipranges/common-crawlers.json",
     },
+
     "Bingbot": {
         "type": "json",
         "url": "https://www.bing.com/toolbox/bingbot.json",
     },
+
     "PerplexityBot": {
         "type": "json",
         "url": "https://www.perplexity.com/perplexitybot.json",
     },
+
     "GPTBot": {
         "type": "json",
         "url": "https://openai.com/gptbot.json",
     },
+
     "Anthropic": {
         "type": "static",
         "ranges": [
@@ -38,6 +42,7 @@ SOURCES = {
             "160.79.104.0/21",
         ],
     },
+
     "Mailgun": {
         "type": "static",
         "ranges": [
@@ -67,6 +72,7 @@ SOURCES = {
             "204.220.160.0/20",
         ],
     },
+
     "Microsoft365": {
         "type": "static",
         "ranges": [
@@ -77,6 +83,21 @@ SOURCES = {
             "104.47.0.0/17",
         ],
     },
+
+    "PayPal": {
+        "type": "static",
+        "ranges": [
+            "64.4.240.0/21",
+            "64.4.248.0/22",
+            "66.211.168.0/22",
+            "91.243.72.0/23",
+            "173.0.80.0/20",
+            "185.177.52.0/22",
+            "192.160.215.0/24",
+            "198.54.216.0/23",
+        ],
+    },
+
     "Cloudflare": {
         "type": "text",
         "url": "https://www.cloudflare.com/ips-v4/",
