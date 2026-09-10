@@ -327,10 +327,10 @@ printf "domain\tpath\tfull_url\thttp_code\teffective_url\tredirect_count\tttfb_s
 
 run_http_test() {
     local domain="$1"
-    local path="$2"
+    local url_path="$2"
     local outfile="$3"
 
-    local full_url="https://${domain}${path}"
+    local full_url="https://${domain}${url_path}"
     local tmp="$WORKDIR/curl_tmp.$$.txt"
 
     curl -kLsS \
@@ -350,13 +350,13 @@ run_http_test() {
     fi
 
     printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
-        "$domain" "$path" "$full_url" "$code" "$eff_url" "$redirects" "$ttfb" "$total" "$(date '+%F %T')" "$result_str" >> "$outfile"
+        "$domain" "$url_path" "$full_url" "$code" "$eff_url" "$redirects" "$ttfb" "$total" "$(date '+%F %T')" "$result_str" >> "$outfile"
 }
 
 # Ejecutar baseline pre-migración para todos los dominios activos
-while IFS=$'\t' read -r DOMAIN PATH; do
+while IFS=$'\t' read -r DOMAIN URL_PATH; do
     [ -n "$DOMAIN" ] || continue
-    run_http_test "$DOMAIN" "$PATH" "$HTTP_BEFORE_FILE"
+    run_http_test "$DOMAIN" "$URL_PATH" "$HTTP_BEFORE_FILE"
 done < "$URLS_FILE"
 
 echo "Baseline HTTP pre-migración completado."
@@ -719,8 +719,8 @@ echo
 stage "11" "18" "Warm-up inicial y primera muestra para pools recién creados..."
 
 # Enviar solicitudes GET livianas a dominios recién migrados
-while IFS=$'\t' read -r DOMAIN PATH; do
-    curl -kLsS --connect-timeout 2 --max-time 3 "https://${DOMAIN}${PATH}" </dev/null >/dev/null 2>&1 || true
+while IFS=$'\t' read -r DOMAIN URL_PATH; do
+    curl -kLsS --connect-timeout 2 --max-time 3 "https://${DOMAIN}${URL_PATH}" </dev/null >/dev/null 2>&1 || true
 done < "$URLS_FILE"
 
 sleep 1
