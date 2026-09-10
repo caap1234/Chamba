@@ -383,7 +383,7 @@ with open(http_file) as f:
         http_summary[row["domain"]].append(row["http_code"])
 
 with open(domains_file) as f, open(candidates_file, "w", newline="") as out:
-    w = csv.writer(out, delimiter="\t")
+    w = csv.writer(out, delimiter="\t", lineterminator="\n")
     w.writerow(["domain", "account", "version", "fpm", "source", "suspended", "handler", "yaml", "fpm_pkg_installed", "category"])
 
     for line in f:
@@ -413,17 +413,21 @@ printf "%-32s %-12s %-10s %-10s %-18s %-15s\n" \
 printf "%-32s %-12s %-10s %-10s %-18s %-15s\n" \
     "--------------------------------" "------------" "----------" "----------" "------------------" "---------------"
 
+sed -i 's/\r$//' "$MIGRATION_CANDIDATES" 2>/dev/null || true
+
 while IFS=$'\t' read -r DOMAIN ACCOUNT VERSION FPM SOURCE SUSPENDED HANDLER YAML PKG_INST CAT; do
-    [ "$DOMAIN" = "domain" ] && continue
+    DOM_CLEAN=$(echo "$DOMAIN" | tr -d '\r')
+    CAT_CLEAN=$(echo "$CAT" | tr -d '\r')
+    [ "$DOM_CLEAN" = "domain" ] && continue
     PKG_NAME="${VERSION}-php-fpm"
 
-    if [[ "$CAT" == "ALREADY_FPM" ]]; then
+    if [[ "$CAT_CLEAN" == "ALREADY_FPM" ]]; then
         STATUS_TEXT="${GREEN}FPM ACTIVO${RESET}"
-    elif [[ "$CAT" == "CAN_ENABLE_FPM" ]]; then
+    elif [[ "$CAT_CLEAN" == "CAN_ENABLE_FPM" ]]; then
         STATUS_TEXT="${YELLOW}LISTO PARA MIGRAR${RESET}"
-    elif [[ "$CAT" == "NEEDS_FPM_PKG" ]]; then
+    elif [[ "$CAT_CLEAN" == "NEEDS_FPM_PKG" ]]; then
         STATUS_TEXT="${RED}FALTA PAQUETE${RESET}"
-    elif [[ "$CAT" == "SUSPENDED" ]]; then
+    elif [[ "$CAT_CLEAN" == "SUSPENDED" ]]; then
         STATUS_TEXT="${YELLOW}SUSPENDIDO${RESET}"
     else
         STATUS_TEXT="ESPECIAL"
@@ -433,18 +437,18 @@ while IFS=$'\t' read -r DOMAIN ACCOUNT VERSION FPM SOURCE SUSPENDED HANDLER YAML
     [[ "$PKG_INST" == "0" ]] && PKG_TEXT="${RED}NO INSTALADO${RESET}"
 
     printf "%-32s %-12s %-10s %-10s %-18s %-15s\n" \
-        "$DOMAIN" "$ACCOUNT" "$VERSION" "$HANDLER" "$PKG_NAME" "$STATUS_TEXT"
+        "$DOM_CLEAN" "$ACCOUNT" "$VERSION" "$HANDLER" "$PKG_NAME" "$STATUS_TEXT"
 done < "$MIGRATION_CANDIDATES"
 
 echo
 
-CAN_MIGRATE_COUNT=$(awk -F'\t' '$10=="CAN_ENABLE_FPM" {c++} END {print c+0}' "$MIGRATION_CANDIDATES")
-NEEDS_PKG_COUNT=$(awk -F'\t' '$10=="NEEDS_FPM_PKG" {c++} END {print c+0}' "$MIGRATION_CANDIDATES")
+CAN_MIGRATE_COUNT=$(awk -F'\t' '{gsub(/\r/,""); if($10=="CAN_ENABLE_FPM") c++} END {print c+0}' "$MIGRATION_CANDIDATES")
+NEEDS_PKG_COUNT=$(awk -F'\t' '{gsub(/\r/,""); if($10=="NEEDS_FPM_PKG") c++} END {print c+0}' "$MIGRATION_CANDIDATES")
 
 ENABLE_MIGRATION=0
 
 if [[ "$CAN_MIGRATE_COUNT" -gt 0 || "$NEEDS_PKG_COUNT" -gt 0 ]]; then
-    echo -e "${YELLOW}Se detectaron dominios que actualmente no utilizan PHP-FPM.${RESET}"
+    echo -e "${YELLOW}Se detectaron dominios que actualmente no utilizan PHP-FPM (${CAN_MIGRATE_COUNT} listos para migrar, ${NEEDS_PKG_COUNT} necesitan paquete).${RESET}"
     prompt_user "¿Deseas habilitar PHP-FPM en los dominios compatibles que actualmente no lo utilizan? [y/N]: " CONFIRM_MIG
     case "$CONFIRM_MIG" in
         y|Y|yes|YES)
@@ -468,7 +472,7 @@ stage "6" "18" "Instalación opcional de componentes PHP-FPM faltantes..."
 INSTALLED_NEW_PKGS=0
 
 if [[ "$ENABLE_MIGRATION" == "1" && "$NEEDS_PKG_COUNT" -gt 0 ]]; then
-    MISSING_PKGS=$(awk -F'\t' '$10=="NEEDS_FPM_PKG" {print $3"-php-fpm"}' "$MIGRATION_CANDIDATES" | sort -u)
+    MISSING_PKGS=$(awk -F'\t' '{gsub(/\r/,""); if($10=="NEEDS_FPM_PKG") print $3"-php-fpm"}' "$MIGRATION_CANDIDATES" | sort -u)
 
     echo
     echo -e "${YELLOW}Los siguientes paquetes son necesarios para activar PHP-FPM:${RESET}"
@@ -504,7 +508,7 @@ with open(candidates_file) as f:
         rows.append(row)
 
 with open(candidates_file, "w", newline="") as out:
-    w = csv.DictWriter(out, fieldnames=list(rows[0].keys()), delimiter="\t")
+    w = csv.DictWriter(out, fieldnames=list(rows[0].keys()), delimiter="\t", lineterminator="\n")
     w.writeheader()
     w.writerows(rows)
 ' "$MIGRATION_CANDIDATES" </dev/null
@@ -534,23 +538,25 @@ GLOBAL_ABORT=0
 
 if [[ "$ENABLE_MIGRATION" == "1" ]]; then
     while IFS=$'\t' read -r DOMAIN ACCOUNT VERSION FPM SOURCE SUSPENDED HANDLER YAML PKG_INST CAT; do
-        [ "$DOMAIN" = "domain" ] && continue
+        DOM_CLEAN=$(echo "$DOMAIN" | tr -d '\r')
+        CAT_CLEAN=$(echo "$CAT" | tr -d '\r')
+        [ "$DOM_CLEAN" = "domain" ] && continue
 
-        if [[ "$CAT" != "CAN_ENABLE_FPM" ]]; then
+        if [[ "$CAT_CLEAN" != "CAN_ENABLE_FPM" ]]; then
             continue
         fi
 
         if [[ "$GLOBAL_ABORT" == "1" ]]; then
-            echo -e "${YELLOW}OMITIDO $DOMAIN (Global Abort activado por regresiones previas).${RESET}"
-            log "$DOMAIN | SKIPPED | Global Abort"
+            echo -e "${YELLOW}OMITIDO $DOM_CLEAN (Global Abort activado por regresiones previas).${RESET}"
+            log "$DOM_CLEAN | SKIPPED | Global Abort"
             continue
         fi
 
-        echo -e "${BLUE}Procesando migración:${RESET} $DOMAIN ($VERSION)"
-        log "$DOMAIN | Activando FPM | version=$VERSION | source=$SOURCE"
+        echo -e "${BLUE}Procesando migración:${RESET} $DOM_CLEAN ($VERSION)"
+        log "$DOM_CLEAN | Activando FPM | version=$VERSION | source=$SOURCE"
 
         # 1. Invocación WHM API
-        RESULT="$(whmapi1 --output=json php_set_vhost_versions version="$VERSION" vhost="$DOMAIN" php_fpm=1 </dev/null 2>&1)"
+        RESULT="$(whmapi1 --output=json php_set_vhost_versions version="$VERSION" vhost="$DOM_CLEAN" php_fpm=1 </dev/null 2>&1)"
         echo "$RESULT" >> "$LOG_FILE"
 
         API_STATUS="$(printf '%s' "$RESULT" | python3 -c '
@@ -564,18 +570,18 @@ except Exception:
 
         if [[ "$API_STATUS" != "1" ]]; then
             echo -e "  Estado: ${RED}ERROR API WHM${RESET}"
-            log "$DOMAIN | FAILED API"
+            log "$DOM_CLEAN | FAILED API"
             continue
         fi
 
         # 2. Re-verificar pruebas HTTP post migración para este dominio
-        DOMAIN_URLS=$(grep "^${DOMAIN}"$'\t' "$URLS_FILE" || true)
+        DOMAIN_URLS=$(grep "^${DOM_CLEAN}"$'\t' "$URLS_FILE" || true)
 
         HAS_REGRESSION=0
 
         while IFS=$'\t' read -r _ DOM_PATH; do
             [ -n "$DOM_PATH" ] || continue
-            run_http_test "$DOMAIN" "$DOM_PATH" "$HTTP_AFTER_FILE"
+            run_http_test "$DOM_CLEAN" "$DOM_PATH" "$HTTP_AFTER_FILE"
 
             # Comparar pre vs post para esta URL
             python3 -c '
@@ -614,12 +620,12 @@ else:
     status = "CHANGED"
 
 with open(compare_file, "a", newline="") as out:
-    w = csv.writer(out, delimiter="\t")
+    w = csv.writer(out, delimiter="\t", lineterminator="\n")
     w.writerow([domain, b_code, a_code, status, f"path={path}"])
 
 if status == "REGRESSION_CRITICAL":
     sys.exit(2)
-' "$HTTP_BEFORE_FILE" "$HTTP_AFTER_FILE" "$DOMAIN" "$DOM_PATH" "$HTTP_COMPARE_FILE" </dev/null
+' "$HTTP_BEFORE_FILE" "$HTTP_AFTER_FILE" "$DOM_CLEAN" "$DOM_PATH" "$HTTP_COMPARE_FILE" </dev/null
             RC=$?
             if [[ $RC -eq 2 ]]; then
                 HAS_REGRESSION=1
@@ -628,12 +634,12 @@ if status == "REGRESSION_CRITICAL":
 
         if [[ "$HAS_REGRESSION" == "1" ]]; then
             echo -e "  Estado: ${RED}[REGRESSION_CRITICAL] Se detectó regresión HTTP.${RESET}"
-            log "$DOMAIN | REGRESSION_CRITICAL | Realizando rollback de FPM..."
+            log "$DOM_CLEAN | REGRESSION_CRITICAL | Realizando rollback de FPM..."
 
             # Rollback unitario
-            whmapi1 --output=json php_set_vhost_versions version="$VERSION" vhost="$DOMAIN" php_fpm=0 </dev/null >> "$LOG_FILE" 2>&1
-            echo -e "  Rollback: ${YELLOW}PHP-FPM desactivado para $DOMAIN (versión $VERSION preservada).${RESET}"
-            log "$DOMAIN | ROLLED_BACK"
+            whmapi1 --output=json php_set_vhost_versions version="$VERSION" vhost="$DOM_CLEAN" php_fpm=0 </dev/null >> "$LOG_FILE" 2>&1
+            echo -e "  Rollback: ${YELLOW}PHP-FPM desactivado para $DOM_CLEAN (versión $VERSION preservada).${RESET}"
+            log "$DOM_CLEAN | ROLLED_BACK"
 
             ((CONSECUTIVE_REGRESSIONS++))
 
@@ -644,7 +650,7 @@ if status == "REGRESSION_CRITICAL":
             fi
         else
             echo -e "  Estado: ${GREEN}[OK] PHP-FPM activado y validado sin regresiones.${RESET}"
-            log "$DOMAIN | SUCCESS FPM"
+            log "$DOM_CLEAN | SUCCESS FPM"
             CONSECUTIVE_REGRESSIONS=0
         fi
 
@@ -933,7 +939,7 @@ with open(before_file) as f:
             metrics[d].append((code, total, ttfb))
 
 with open(perf_file, "w", newline="") as out:
-    w = csv.writer(out, delimiter="\t")
+    w = csv.writer(out, delimiter="\t", lineterminator="\n")
     w.writerow(["domain", "http_ok", "avg_total_s", "max_total_s", "avg_ttfb_s"])
 
     for dom, vals in metrics.items():
@@ -967,7 +973,7 @@ fields = [
 ]
 
 with open(out, "w", newline="") as f:
-    w = csv.DictWriter(f, fields, delimiter="\t")
+    w = csv.DictWriter(f, fields, delimiter="\t", lineterminator="\n")
     w.writeheader()
     for domain, p in sorted(pools.items()):
         row = {"domain": domain}
@@ -1097,7 +1103,7 @@ out_fields = [
 ]
 
 with open(out_path, "w", newline="") as f:
-    w = csv.DictWriter(f, out_fields, delimiter="\t")
+    w = csv.DictWriter(f, out_fields, delimiter="\t", lineterminator="\n")
     w.writeheader()
 
     for idx, r in enumerate(rows):
@@ -1230,7 +1236,7 @@ if [ -n "$MISSING_YAMLS" ]; then
     echo
 fi
 
-APPLY_SAFE_COUNT=$(awk -F'\t' '$20=="SAFE_TO_APPLY" && $8!=$11 {c++} END {print c+0}' "$RECS_FILE")
+APPLY_SAFE_COUNT=$(awk -F'\t' '{gsub(/\r/,""); if($20=="SAFE_TO_APPLY" && $8!=$11) c++} END {print c+0}' "$RECS_FILE")
 
 echo -e "${YELLOW}INFORMACIÓN DE APLICACIÓN:${RESET}"
 echo "  1) Se modificarán ÚNICAMENTE los pools marcados como SAFE_TO_APPLY ($APPLY_SAFE_COUNT pools elegibles)."
@@ -1473,7 +1479,7 @@ with open(domains_file) as f:
         ])
 
 with open(csv_out, "w", newline="") as f:
-    w = csv.writer(f)
+    w = csv.writer(f, lineterminator="\n")
     w.writerow(["domain", "account", "php_version", "fpm_active", "http_status",
                 "cur_children", "final_children", "cur_requests", "rec_requests",
                 "data_confidence", "eligibility", "tuning_reason"])
