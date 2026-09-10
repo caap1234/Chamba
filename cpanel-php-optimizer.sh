@@ -33,6 +33,7 @@ MAX_CHILDREN_HARD="${MAX_CHILDREN_HARD:-20}"     # Tope absoluto de max_children
 ACTIVE_MIN_CHILDREN="${ACTIVE_MIN_CHILDREN:-2}"  # Mínimo para pool activo con tráfico
 IDLE_MIN_CHILDREN="${IDLE_MIN_CHILDREN:-1}"      # Mínimo para pool sin tráfico reciente
 MAX_CONSECUTIVE_REGRESSIONS="${MAX_CONSECUTIVE_REGRESSIONS:-3}" # Aborto global si hay N regresiones seguidas
+MAX_REDUCTION_RATIO="${MAX_REDUCTION_RATIO:-0.50}" # Máxima reducción porcentual en una sola ejecución (50%)
 
 # ============================================================
 # DIRECTORIO PERMANENTE DE TRABAJO
@@ -176,7 +177,7 @@ if not versions:
 
 [[ $? -eq 0 ]] || die "La respuesta de WHM API php_get_vhost_versions no es válida."
 
-# Parsear handlers globales / por versión PHP
+# Parsear handlers globales / por versión PHP y comprobar binaries FPM
 EA4_CONF="/etc/cpanel/ea4/php.conf"
 
 python3 -c '
@@ -223,8 +224,9 @@ for item in data.get("data", {}).get("versions", []):
             if found:
                 yaml_path = found[0]
 
-    fpm_bin = f"/opt/cpanel/{version}/root/usr/sbin/php-fpm"
-    fpm_pkg_installed = 1 if os.path.isfile(fpm_bin) else 0
+    fpm_bin1 = f"/opt/cpanel/{version}/root/usr/sbin/php-fpm"
+    fpm_bin2 = f"/opt/cpanel/{version}/root/usr/bin/php-fpm"
+    fpm_pkg_installed = 1 if (os.path.isfile(fpm_bin1) or os.path.isfile(fpm_bin2)) else 0
 
     if domain and version:
         print(f"{domain}\t{account}\t{version}\t{fpm}\t{source}\t{suspended}\t{handler}\t{yaml_path}\t{fpm_pkg_installed}")
@@ -393,16 +395,14 @@ with open(domains_file) as f, open(candidates_file, "w", newline="") as out:
         suspended = int(suspended)
         fpm_pkg_installed = int(fpm_pkg_installed)
 
-        if suspended:
+        if suspended == 1:
             cat = "SUSPENDED"
         elif fpm == 1:
             cat = "ALREADY_FPM"
-        elif fpm == 0 and fpm_pkg_installed == 1:
+        elif fpm_pkg_installed == 1:
             cat = "CAN_ENABLE_FPM"
-        elif fpm == 0 and fpm_pkg_installed == 0:
-            cat = "NEEDS_FPM_PKG"
         else:
-            cat = "SPECIAL"
+            cat = "NEEDS_FPM_PKG"
 
         w.writerow([domain, account, version, fpm, source, suspended, handler, yaml_path, fpm_pkg_installed, cat])
 ' "$DOMAINS_FILE" "$HTTP_BEFORE_FILE" "$MIGRATION_CANDIDATES" </dev/null
@@ -495,8 +495,9 @@ with open(candidates_file) as f:
     r = csv.DictReader(f, delimiter="\t")
     for row in r:
         ver = row["version"]
-        fpm_bin = f"/opt/cpanel/{ver}/root/usr/sbin/php-fpm"
-        if os.path.isfile(fpm_bin):
+        fpm_bin1 = f"/opt/cpanel/{ver}/root/usr/sbin/php-fpm"
+        fpm_bin2 = f"/opt/cpanel/{ver}/root/usr/bin/php-fpm"
+        if os.path.isfile(fpm_bin1) or os.path.isfile(fpm_bin2):
             row["fpm_pkg_installed"] = "1"
             if row["category"] == "NEEDS_FPM_PKG":
                 row["category"] = "CAN_ENABLE_FPM"
@@ -696,6 +697,7 @@ HEADROOM_PCT=$HEADROOM_PCT
 MAX_CHILDREN_HARD=$MAX_CHILDREN_HARD
 ACTIVE_MIN_CHILDREN=$ACTIVE_MIN_CHILDREN
 IDLE_MIN_CHILDREN=$IDLE_MIN_CHILDREN
+MAX_REDUCTION_RATIO=$MAX_REDUCTION_RATIO
 EOF
 
 hr
@@ -833,18 +835,33 @@ tail -n +2 "$POOLS_FILE" | cut -f1 | while read -r domain; do
     printf "%s\t%s\n" "$domain" "$hits"
 done >> "$HITS_FILE"
 
-# Tráfico recente por pool
-printf "domain\ttotal\tdynamic\tavg_dyn_rpm\tpeak_dyn_rpm\terrors\n" > "$TRAFFIC_FILE"
+# Tráfico reciente por pool con diagnóstico de log y categoría
+printf "domain\ttraffic_log\ttraffic_source\ttotal_reqs\tdynamic_reqs\tavg_dyn_rpm\tpeak_dyn_rpm\terrors\ttraffic_data\n" > "$TRAFFIC_FILE"
 
 tail -n +2 "$POOLS_FILE" | cut -f1 | while read -r domain; do
     logfile=""
+    source_type="NONE"
     for candidate in \
         "/var/log/nginx/domains/$domain" \
-        "/var/log/nginx/domains/${domain}.log" \
-        "/etc/apache2/logs/domlogs/$domain" \
-        "/usr/local/apache/domlogs/$domain"; do
-        [ -f "$candidate" ] && { logfile="$candidate"; break; }
+        "/var/log/nginx/domains/${domain}.log"; do
+        if [ -f "$candidate" ]; then
+            logfile="$candidate"
+            source_type="NGINX"
+            break
+        fi
     done
+
+    if [ -z "$logfile" ]; then
+        for candidate in \
+            "/etc/apache2/logs/domlogs/$domain" \
+            "/usr/local/apache/domlogs/$domain"; do
+            if [ -f "$candidate" ]; then
+                logfile="$candidate"
+                source_type="APACHE"
+                break
+            fi
+        done
+    fi
 
     if [ -n "$logfile" ]; then
         tmp="$WORKDIR/log.$$.tmp"
@@ -852,9 +869,9 @@ tail -n +2 "$POOLS_FILE" | cut -f1 | while read -r domain; do
         total_reqs=$(wc -l < "$tmp")
 
         if [ "$total_reqs" -eq 0 ]; then
-            printf "%s\t0\t0\t0\t0\t0\n" "$domain"
+            printf "%s\t%s\t%s\t0\t0\t0\t0\t0\tMEASURED_ZERO\n" "$domain" "$logfile" "$source_type"
         else
-            awk -v d="$domain" -v mins="$MINUTES" -F'"' '
+            awk -v d="$domain" -v logf="$logfile" -v stype="$source_type" -v mins="$MINUTES" -F'"' '
             {
                 split($2,a," ")
                 url=a[2]
@@ -878,15 +895,23 @@ tail -n +2 "$POOLS_FILE" | cut -f1 | while read -r domain; do
                 peak=0
                 for (x in permin)
                     if (permin[x] > peak) peak=permin[x]
-                printf "%s\t%d\t%d\t%.2f\t%d\t%d\n",
-                       d, NR, dyn+0, (dyn+0)/mins, peak+0, err+0
+                tdata = (dyn > 0) ? "MEASURED_TRAFFIC" : "MEASURED_ZERO"
+                printf "%s\t%s\t%s\t%d\t%d\t%.2f\t%d\t%d\t%s\n",
+                       d, logf, stype, NR, dyn+0, (dyn+0)/mins, peak+0, err+0, tdata
             }' "$tmp"
         fi
         rm -f "$tmp"
     else
-        printf "%s\t0\t0\t0\t0\t0\n" "$domain"
+        printf "%s\tNONE\tNONE\t0\t0\t0\t0\t0\tLOG_NOT_FOUND\n" "$domain"
     fi
 done >> "$TRAFFIC_FILE"
+
+# Alerta si la recolección de tráfico parece incompleta
+MEASURED_TRAFFIC_COUNT=$(awk -F'\t' '$9=="MEASURED_TRAFFIC" {c++} END {print c+0}' "$TRAFFIC_FILE")
+if [ "$MEASURED_TRAFFIC_COUNT" -eq 0 ]; then
+    echo -e "${YELLOW}ADVERTENCIA: No se detectó tráfico dinámico en los dominios analizados o los logs no fueron localizados.${RESET}"
+    log "WARNING: Tráfico dinámico no detectado en logs."
+fi
 
 # HTTP performance metrics (resumido de baseline)
 printf "domain\thttp_ok\tavg_total_s\tmax_total_s\tavg_ttfb_s\n" > "$HTTP_PERF_FILE"
@@ -936,7 +961,7 @@ fields = [
     "domain","phpver","yaml","pm","pool_type",
     "current_children","current_requests",
     "workers","avg_mb","p90_mb","max_mb","mem_source","confidence",
-    "dynamic","avg_dyn_rpm","peak_dyn_rpm","errors",
+    "traffic_log","traffic_source","total_reqs","dynamic_reqs","avg_dyn_rpm","peak_dyn_rpm","errors","traffic_data",
     "http_ok","avg_total_s","max_total_s","avg_ttfb_s",
     "hits_max_children"
 ]
@@ -981,6 +1006,7 @@ swap_total = max(1.0, f("SWAP_TOTAL_MB"))
 cpu = max(1.0, f("CPU"))
 load1 = f("LOAD1")
 php_now = f("PHP_RSS_MB")
+max_reduction_ratio = float(env.get("MAX_REDUCTION_RATIO", "0.50"))
 
 headroom = max(f("HEADROOM_MIN_MB"), total * f("HEADROOM_PCT") / 100.0)
 cap_pct = total * f("PHP_BUDGET_MAX_PCT") / 100.0
@@ -995,10 +1021,10 @@ load_ratio = load1 / cpu
 
 if swap_used > 256 and swap_ratio > 0.20:
     pressure *= 0.85
-    reasons_global.append("swap alta")
+    reasons_global.append("swap alta (>20%)")
 if load_ratio > 1.50:
     pressure *= 0.85
-    reasons_global.append("load alto")
+    reasons_global.append("load alto (>1.5x CPU)")
 elif load_ratio > 1.00:
     pressure *= 0.92
     reasons_global.append("load sobre CPU")
@@ -1026,7 +1052,7 @@ for r in rows:
     avg_rpm = num(r, "avg_dyn_rpm")
     t = num(r, "avg_total_s")
     hits = num(r, "hits_max_children")
-    dynamic = num(r, "dynamic")
+    dynamic = num(r, "dynamic_reqs")
     pool_type = r.get("pool_type", "EXISTING_FPM")
 
     if r.get("mem_source") == "MEASURED" and (p90 or avg_mem):
@@ -1049,70 +1075,25 @@ for r in rows:
     if hits > 0:
         demand = max(demand, num(r, "current_children") + min(4.0, 1.0 + math.log10(hits + 1)))
 
-    desired = int(math.ceil(demand))
+    raw_rec = int(math.ceil(demand))
 
     if pool_type == "NEW_FPM_POOL":
-        desired = min(desired, 4)
+        raw_rec = min(raw_rec, 4)
 
-    desired = max(i("IDLE_MIN_CHILDREN") if dynamic == 0 else i("ACTIVE_MIN_CHILDREN"), desired)
-    desired = min(i("MAX_CHILDREN_HARD"), desired)
+    raw_rec = max(i("IDLE_MIN_CHILDREN") if dynamic == 0 else i("ACTIVE_MIN_CHILDREN"), raw_rec)
+    raw_rec = min(i("MAX_CHILDREN_HARD"), raw_rec)
 
     r["_mem_ref"] = mem_ref
-    r["_desired"] = desired
-    r["_dynamic"] = dynamic
-
-base_children = {}
-base_cost = 0.0
-for idx, r in enumerate(rows):
-    base = i("ACTIVE_MIN_CHILDREN") if r["_dynamic"] > 0 else i("IDLE_MIN_CHILDREN")
-    base = min(base, r["_desired"])
-    base_children[idx] = base
-    base_cost += base * r["_mem_ref"]
-
-allocated = dict(base_children)
-remaining = php_budget - base_cost
-
-budget_insufficient = remaining < 0
-if budget_insufficient:
-    allocated = {idx: 1 for idx, _ in enumerate(rows)}
-    remaining = php_budget - sum(r["_mem_ref"] for r in rows)
-
-while remaining > 0:
-    candidates = []
-    for idx, r in enumerate(rows):
-        cur = allocated[idx]
-        if cur >= r["_desired"]:
-            continue
-        mem = r["_mem_ref"]
-        if mem > remaining:
-            continue
-
-        peak = num(r, "peak_dyn_rpm")
-        hits = num(r, "hits_max_children")
-        workers = num(r, "workers")
-        need = max(0.0, r["_desired"] - cur)
-        priority = (
-            need * 4.0 +
-            min(10.0, peak / 10.0) +
-            min(8.0, math.log10(hits + 1) * 3.0) +
-            min(5.0, workers)
-        ) / mem
-        candidates.append((priority, idx))
-
-    if not candidates:
-        break
-    _, idx = max(candidates)
-    allocated[idx] += 1
-    remaining -= rows[idx]["_mem_ref"]
-
-cpu_soft_pool_cap = max(3, int(cpu * 3))
+    r["_raw_rec"] = raw_rec
+    r["_demand"] = demand
+    r["_concurrency"] = max(concurrency_peak, concurrency_avg)
 
 out_fields = [
-    "domain", "phpver", "yaml", "pool_type", "confidence", "mem_source",
-    "current_children", "recommended_children",
+    "domain", "phpver", "yaml", "pool_type", "confidence", "mem_source", "traffic_data",
+    "current_children", "raw_recommendation", "guardrail_recommendation", "final_children",
     "current_requests", "recommended_requests",
     "workers", "mem_ref_mb", "peak_dyn_rpm", "avg_total_s",
-    "hits_max_children", "estimated_pool_max_mb", "reason"
+    "hits_max_children", "estimated_pool_max_mb", "tuning_eligibility", "reason"
 ]
 
 with open(out_path, "w", newline="") as f:
@@ -1120,18 +1101,67 @@ with open(out_path, "w", newline="") as f:
     w.writeheader()
 
     for idx, r in enumerate(rows):
-        rec = allocated[idx]
-        if r["_desired"] > cpu_soft_pool_cap and num(r, "hits_max_children") == 0:
-            rec = min(rec, cpu_soft_pool_cap)
+        cur_ch = int(num(r, "current_children"))
+        raw_rec = r["_raw_rec"]
+        pool_type = r.get("pool_type", "EXISTING_FPM")
+        mem_source = r.get("mem_source", "ESTIMATED")
+        confidence = r.get("confidence", "LOW")
+        traffic_data = r.get("traffic_data", "LOG_NOT_FOUND")
+        hits = int(num(r, "hits_max_children"))
 
-        rec = max(1, min(i("MAX_CHILDREN_HARD"), int(rec)))
+        reasons = []
 
+        # REGLA 1 & 11: Protección estricta ante falta de datos
+        if pool_type == "EXISTING_FPM" and (confidence in ("LOW", "PROVISIONAL") or traffic_data != "MEASURED_TRAFFIC" or mem_source == "ESTIMATED"):
+            final_rec = cur_ch
+            guardrail_rec = cur_ch
+            eligibility = "INSUFFICIENT_DATA"
+            reasons.append("Datos de tráfico/memoria no medidos estadísticamente; preserva configuración actual")
+        else:
+            # Regla de piso y guardrail de reducción
+            min_allowed = 2 if (traffic_data == "MEASURED_TRAFFIC" or hits > 0 or r["_concurrency"] > 0.5) else 1
+
+            if raw_rec == 1 and not (confidence in ("HIGH", "MEDIUM") and traffic_data == "MEASURED_ZERO" and hits == 0 and cur_ch <= 3):
+                raw_rec = max(2, raw_rec)
+
+            raw_rec = max(min_allowed, raw_rec)
+
+            # Regla 6: Guardrail de Reducción Progresiva (max 50% por ejecución)
+            if raw_rec < cur_ch:
+                max_reduction = max(1, int(cur_ch * max_reduction_ratio))
+                guardrail_rec = max(cur_ch - max_reduction, raw_rec)
+            else:
+                guardrail_rec = raw_rec
+
+            final_rec = guardrail_rec
+
+            if final_rec == cur_ch:
+                eligibility = "NO_CHANGE"
+                reasons.append("Configuración actual adecuada")
+            elif pool_type == "NEW_FPM_POOL":
+                eligibility = "SAFE_TO_APPLY"
+                reasons.append("Configuración inicial provisional conservadora para nuevo pool")
+            elif confidence in ("HIGH", "MEDIUM") and traffic_data == "MEASURED_TRAFFIC":
+                eligibility = "SAFE_TO_APPLY"
+                reasons.append("Ajuste basado en demanda/memoria real observada")
+            else:
+                eligibility = "REVIEW_RECOMMENDED"
+                reasons.append("Ajuste recomendado para revisión manual")
+
+        if hits > 0:
+            reasons.append("alcanzó max_children (%d veces)" % hits)
+        if num(r, "peak_dyn_rpm") > 0:
+            reasons.append("pico %.0f dyn/min" % num(r, "peak_dyn_rpm"))
+        if num(r, "avg_total_s") >= 2:
+            reasons.append("HTTP lento %.2fs" % num(r, "avg_total_s"))
+
+        # Reciclaje pm.max_requests
         mem = r["_mem_ref"]
         avg = num(r, "avg_mb")
         maxm = num(r, "max_mb")
         variability = (maxm / avg) if avg > 0 else 1.0
 
-        if r.get("confidence") == "PROVISIONAL" or num(r, "workers") == 0:
+        if confidence == "PROVISIONAL" or num(r, "workers") == 0:
             maxreq = 250
         elif mem >= 256 or variability >= 3.0:
             maxreq = 100
@@ -1144,41 +1174,27 @@ with open(out_path, "w", newline="") as f:
         else:
             maxreq = 500
 
-        reasons = []
-        if r.get("pool_type") == "NEW_FPM_POOL":
-            reasons.append("pool recién migrado (recomendación provisional conservadora)")
-        if num(r, "hits_max_children") > 0:
-            reasons.append("alcanzó max_children")
-        if num(r, "peak_dyn_rpm") > 0:
-            reasons.append("pico %.0f dyn/min" % num(r, "peak_dyn_rpm"))
-        if num(r, "avg_total_s") >= 2:
-            reasons.append("HTTP lento %.2fs" % num(r, "avg_total_s"))
-        if mem >= 128:
-            reasons.append("worker pesado %.0fMB" % mem)
-        if num(r, "dynamic") == 0:
-            reasons.append("sin tráfico dinámico reciente")
-        if budget_insufficient:
-            reasons.append("RAM global insuficiente para mínimos")
-        if not reasons:
-            reasons.append("demanda/memoria observada")
-
         w.writerow({
             "domain": r["domain"],
             "phpver": r["phpver"],
             "yaml": r["yaml"],
-            "pool_type": r.get("pool_type", "EXISTING_FPM"),
-            "confidence": r.get("confidence", "HIGH"),
-            "mem_source": r.get("mem_source", "MEASURED"),
-            "current_children": int(num(r, "current_children")),
-            "recommended_children": rec,
+            "pool_type": pool_type,
+            "confidence": confidence,
+            "mem_source": mem_source,
+            "traffic_data": traffic_data,
+            "current_children": cur_ch,
+            "raw_recommendation": raw_rec,
+            "guardrail_recommendation": guardrail_rec,
+            "final_children": final_rec,
             "current_requests": int(num(r, "current_requests")),
             "recommended_requests": maxreq,
             "workers": int(num(r, "workers")),
             "mem_ref_mb": "%.1f" % mem,
             "peak_dyn_rpm": "%.1f" % num(r, "peak_dyn_rpm"),
             "avg_total_s": "%.3f" % num(r, "avg_total_s"),
-            "hits_max_children": int(num(r, "hits_max_children")),
-            "estimated_pool_max_mb": "%.1f" % (rec * mem),
+            "hits_max_children": hits,
+            "estimated_pool_max_mb": "%.1f" % (final_rec * mem),
+            "tuning_eligibility": eligibility,
             "reason": "; ".join(reasons)
         })
 ' "$SYSTEM_ENV" "$MERGED_FILE" "$RECS_FILE" </dev/null
@@ -1190,20 +1206,20 @@ with open(out_path, "w", newline="") as f:
 stage "14" "18" "RECOMENDACIONES DE OPTIMIZACIÓN DE POOLS"
 
 echo
-printf "%-32s %-12s %-12s %-6s %-6s %-6s %-6s %-7s %-8s %-6s\n" \
-    "DOMINIO" "TIPO POOL" "CONFIANZA" "CUR_CH" "REC_CH" "CUR_RQ" "REC_RQ" "WORKERS" "MEM_MB" "HITS"
-printf "%-32s %-12s %-12s %-6s %-6s %-6s %-6s %-7s %-8s %-6s\n" \
-    "--------------------------------" "------------" "------------" "------" "------" "------" "------" "-------" "--------" "------"
+printf "%-32s %-12s %-12s %-16s %-16s %-6s %-6s %-6s %-6s %-7s %-8s %-6s\n" \
+    "DOMINIO" "TIPO POOL" "CONFIANZA" "TRÁFICO" "ELEGIBILIDAD" "CUR_CH" "REC_CH" "CUR_RQ" "REC_RQ" "WORKERS" "MEM_MB" "HITS"
+printf "%-32s %-12s %-12s %-16s %-16s %-6s %-6s %-6s %-6s %-7s %-8s %-6s\n" \
+    "--------------------------------" "------------" "------------" "----------------" "----------------" "------" "------" "------" "------" "-------" "--------" "------"
 
-tail -n +2 "$RECS_FILE" | while IFS=$'\t' read -r dom phpver yaml ptype conf msrc cc rc cr rr workers mem peak htt hits est reason; do
-    printf "%-32s %-12s %-12s %-6s %-6s %-6s %-6s %-7s %-8s %-6s\n" \
-        "$dom" "$ptype" "$conf" "$cc" "$rc" "$cr" "$rr" "$workers" "$mem" "$hits"
+tail -n +2 "$RECS_FILE" | while IFS=$'\t' read -r dom phpver yaml ptype conf msrc tdata cc raw_rec guard_rec final_ch cr rr workers mem peak htt hits est eligibility reason; do
+    printf "%-32s %-12s %-12s %-16s %-16s %-6s %-6s %-6s %-6s %-7s %-8s %-6s\n" \
+        "$dom" "$ptype" "$conf" "$tdata" "$eligibility" "$cc" "$final_ch" "$cr" "$rr" "$workers" "$mem" "$hits"
 done
 
 echo
-echo "Detalle de motivos por dominio:"
-tail -n +2 "$RECS_FILE" | while IFS=$'\t' read -r dom phpver yaml ptype conf msrc cc rc cr rr workers mem peak htt hits est reason; do
-    echo "  - $dom: $reason"
+echo "Detalle de decisiones por dominio:"
+tail -n +2 "$RECS_FILE" | while IFS=$'\t' read -r dom phpver yaml ptype conf msrc tdata cc raw_rec guard_rec final_ch cr rr workers mem peak htt hits est eligibility reason; do
+    echo "  - $dom [$eligibility]: $reason"
 done
 
 echo
@@ -1214,14 +1230,23 @@ if [ -n "$MISSING_YAMLS" ]; then
     echo
 fi
 
+APPLY_SAFE_COUNT=$(awk -F'\t' '$20=="SAFE_TO_APPLY" && $8!=$11 {c++} END {print c+0}' "$RECS_FILE")
+
 echo -e "${YELLOW}INFORMACIÓN DE APLICACIÓN:${RESET}"
-echo "  1) Se respaldará cada YAML en $WORKDIR/yaml_backups/"
-echo "  2) Se modificarán ÚNICAMENTE pm_max_children y pm_max_requests en /var/cpanel/userdata/"
-echo "  3) Se ejecutará /usr/local/cpanel/scripts/php_fpm_config --rebuild"
-echo "  4) Se reiniciarán Apache PHP-FPM y HTTPD"
-echo "  5) Se verificará la coincidencia en los .conf generados"
+echo "  1) Se modificarán ÚNICAMENTE los pools marcados como SAFE_TO_APPLY ($APPLY_SAFE_COUNT pools elegibles)."
+echo "  2) Se respaldará cada YAML en $WORKDIR/yaml_backups/"
+echo "  3) Se modificarán ÚNICAMENTE pm_max_children y pm_max_requests en /var/cpanel/userdata/"
+echo "  4) Se ejecutará /usr/local/cpanel/scripts/php_fpm_config --rebuild"
+echo "  5) Se reiniciarán Apache PHP-FPM y HTTPD"
 echo "  6) Si ocurre algún fallo, se aplicará ROLLBACK AUTOMÁTICO"
 echo
+
+if [ "$APPLY_SAFE_COUNT" -eq 0 ]; then
+    echo -e "${GREEN}No hay pools con datos suficientes que requieran modificaciones automáticas.${RESET}"
+    echo "Los pools sin datos de tráfico o memoria se han mantenido intactos de forma segura."
+    log "No hay pools elegibles SAFE_TO_APPLY para modificar."
+    exit 0
+fi
 
 prompt_user "Escribe APLICAR para confirmar los cambios de tuning, o cualquier otra cosa para salir: " CONFIRM_TUNING
 
@@ -1310,11 +1335,17 @@ rollback_yamls() {
     log "Rollback de YAMLs completado."
 }
 
-while IFS=$'\t' read -r dom phpver yaml ptype conf msrc cc rc cr rr workers mem peak htt hits est reason; do
+# Modificar únicamente dominios marcados como SAFE_TO_APPLY
+tail -n +2 "$RECS_FILE" | while IFS=$'\t' read -r dom phpver yaml ptype conf msrc tdata cc raw_rec guard_rec final_ch cr rr workers mem peak htt hits est eligibility reason; do
     [ "$dom" = "domain" ] && continue
     [ "$yaml" != "MISSING" ] || continue
 
-    if [ "$cc" = "$rc" ] && [ "$cr" = "$rr" ]; then
+    if [[ "$eligibility" != "SAFE_TO_APPLY" ]]; then
+        echo -e "${YELLOW}OMITIDO${RESET} $dom (Elegibilidad: $eligibility - preservado)."
+        continue
+    fi
+
+    if [ "$cc" = "$final_ch" ] && [ "$cr" = "$rr" ]; then
         echo -e "${GREEN}OMITIDO${RESET} $dom (ya coincide con la recomendación)."
         continue
     fi
@@ -1323,16 +1354,16 @@ while IFS=$'\t' read -r dom phpver yaml ptype conf msrc cc rc cr rr workers mem 
     backup="$WORKDIR/yaml_backups/${rel_name}"
     cp -a "$yaml" "$backup" || die "No se pudo respaldar $yaml"
 
-    update_yaml "$yaml" "$rc" "$rr" || {
+    update_yaml "$yaml" "$final_ch" "$rr" || {
         echo "Error editando $yaml. Iniciando rollback."
         rollback_yamls
         exit 1
     }
 
-    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "$dom" "$yaml" "$backup" "$cc" "$rc" "$cr" "$rr" >> "$CHANGED_LIST"
-    echo -e "${GREEN}APLICADO${RESET} $dom: max_children $cc -> $rc | max_requests $cr -> $rr"
-    log "$dom | TUNED | children: $cc->$rc | requests: $cr->$rr"
-done < "$RECS_FILE"
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "$dom" "$yaml" "$backup" "$cc" "$final_ch" "$cr" "$rr" >> "$CHANGED_LIST"
+    echo -e "${GREEN}APLICADO${RESET} $dom: max_children $cc -> $final_ch | max_requests $cr -> $rr"
+    log "$dom | TUNED | children: $cc->$final_ch | requests: $cr->$rr"
+done
 
 CHANGED_COUNT=$(( $(wc -l < "$CHANGED_LIST") - 1 ))
 
@@ -1436,16 +1467,16 @@ with open(domains_file) as f:
 
         rows.append([
             dom, acc, ver, "YES" if fpm=="1" else "NO", comp,
-            rc.get("current_children", "N/A"), rc.get("recommended_children", "N/A"),
+            rc.get("current_children", "N/A"), rc.get("final_children", "N/A"),
             rc.get("current_requests", "N/A"), rc.get("recommended_requests", "N/A"),
-            rc.get("confidence", "N/A"), rc.get("reason", "N/A")
+            rc.get("confidence", "N/A"), rc.get("tuning_eligibility", "N/A"), rc.get("reason", "N/A")
         ])
 
 with open(csv_out, "w", newline="") as f:
     w = csv.writer(f)
     w.writerow(["domain", "account", "php_version", "fpm_active", "http_status",
-                "cur_children", "rec_children", "cur_requests", "rec_requests",
-                "data_confidence", "tuning_reason"])
+                "cur_children", "final_children", "cur_requests", "rec_requests",
+                "data_confidence", "eligibility", "tuning_reason"])
     w.writerows(rows)
 ' "$DOMAINS_FILE" "$RECS_FILE" "$CHANGED_LIST" "$HTTP_COMPARE_FILE" "$REPORT_CSV" </dev/null
 
