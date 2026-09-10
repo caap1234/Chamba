@@ -17,6 +17,8 @@
 set -u
 set -o pipefail
 
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/cpanel/bin"
+
 # ============================================================
 # PARÁMETROS Y LÍMITES DE SEGURIDAD
 # ============================================================
@@ -106,6 +108,20 @@ hr() {
     echo -e "${BOLD}============================================================${RESET}"
 }
 
+prompt_user() {
+    local msg="$1"
+    local varname="$2"
+    local input_val=""
+    if [[ -t 0 ]]; then
+        read -r -p "$msg" input_val
+    elif [[ -c /dev/tty ]]; then
+        read -r -p "$msg" input_val < /dev/tty
+    else
+        read -r -p "$msg" input_val 2>/dev/null || input_val=""
+    fi
+    eval "$varname=\"\$input_val\""
+}
+
 # ============================================================
 # ETAPA 1: VALIDACIONES DEL SERVIDOR
 # ============================================================
@@ -139,12 +155,12 @@ log "Inicio de ejecución del script."
 
 stage "2" "18" "Obteniendo inventario completo de VirtualHosts vía WHM API..."
 
-if ! whmapi1 --output=json php_get_vhost_versions > "$BEFORE_JSON" 2>>"$LOG_FILE"; then
+if ! whmapi1 --output=json php_get_vhost_versions </dev/null > "$BEFORE_JSON" 2>>"$LOG_FILE"; then
     die "No fue posible ejecutar 'whmapi1 php_get_vhost_versions'."
 fi
 
 # Validar respuesta JSON
-python3 - "$BEFORE_JSON" <<'PY'
+python3 -c '
 import json, sys
 try:
     data = json.load(open(sys.argv[1]))
@@ -156,14 +172,14 @@ versions = data.get("data", {}).get("versions")
 if not versions:
     print("La API whmapi1 no devolvió VirtualHosts.")
     sys.exit(1)
-PY
+' "$BEFORE_JSON" </dev/null
 
 [[ $? -eq 0 ]] || die "La respuesta de WHM API php_get_vhost_versions no es válida."
 
 # Parsear handlers globales / por versión PHP
 EA4_CONF="/etc/cpanel/ea4/php.conf"
 
-python3 - "$BEFORE_JSON" "$EA4_CONF" > "$DOMAINS_FILE" <<'PY'
+python3 -c '
 import json, sys, os, glob
 
 before_json = sys.argv[1]
@@ -176,7 +192,7 @@ if os.path.isfile(ea4_conf):
             line = line.strip()
             if line and not line.startswith("#") and ":" in line:
                 k, v = line.split(":", 1)
-                handlers_map[k.strip()] = v.strip().strip('"')
+                handlers_map[k.strip()] = v.strip().strip("\"")
 
 data = json.load(open(before_json))
 
@@ -197,7 +213,6 @@ for item in data.get("data", {}).get("versions", []):
 
     handler = handlers_map.get(version, "unknown")
 
-    # Localizar YAML
     yaml_path = "MISSING"
     if account and domain:
         candidate = f"/var/cpanel/userdata/{account}/{domain}.php-fpm.yaml"
@@ -208,13 +223,12 @@ for item in data.get("data", {}).get("versions", []):
             if found:
                 yaml_path = found[0]
 
-    # Comprobar paquete FPM instalado
     fpm_bin = f"/opt/cpanel/{version}/root/usr/sbin/php-fpm"
     fpm_pkg_installed = 1 if os.path.isfile(fpm_bin) else 0
 
     if domain and version:
         print(f"{domain}\t{account}\t{version}\t{fpm}\t{source}\t{suspended}\t{handler}\t{yaml_path}\t{fpm_pkg_installed}")
-PY
+' "$BEFORE_JSON" "$EA4_CONF" </dev/null > "$DOMAINS_FILE"
 
 TOTAL_VH=$(wc -l < "$DOMAINS_FILE")
 echo "VirtualHosts totales encontrados: $TOTAL_VH"
@@ -234,7 +248,7 @@ for i in $(seq 0 $((MINUTES-1))); do
 done
 
 # Seleccionar URLs seguras por dominio
-python3 - "$DOMAINS_FILE" "$PATTERNS_FILE" "$MINUTES" "$URLS_FILE" <<'PY'
+python3 -c '
 import sys, os, re, glob
 from collections import Counter
 
@@ -243,22 +257,21 @@ domains_file, patterns_file, minutes, urls_file = sys.argv[1:5]
 with open(patterns_file) as f:
     patterns = [line.strip() for line in f if line.strip()]
 
-static_exts = ('.css', '.js', '.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.ico',
-               '.woff', '.woff2', '.ttf', '.map', '.mp4', '.webm', '.pdf', '.zip', '.xml', '.txt')
+static_exts = (".css", ".js", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".ico",
+               ".woff", ".woff2", ".ttf", ".map", ".mp4", ".webm", ".pdf", ".zip", ".xml", ".txt")
 
-sensitive_terms = ('token', 'nonce', 'auth', 'login', 'logout', 'session', 'secret',
-                   'password', 'key', 'admin', 'cart', 'checkout', 'pay', 'reset')
+sensitive_terms = ("token", "nonce", "auth", "login", "logout", "session", "secret",
+                   "password", "key", "admin", "cart", "checkout", "pay", "reset")
 
 urls_out = []
 
 with open(domains_file) as f:
     for line in f:
-        parts = line.strip().split('\t')
+        parts = line.strip().split("\t")
         if len(parts) < 9:
             continue
         domain = parts[0]
 
-        # Encontrar log
         logfile = None
         for cand in [f"/var/log/nginx/domains/{domain}", f"/var/log/nginx/domains/{domain}.log",
                      f"/etc/apache2/logs/domlogs/{domain}", f"/usr/local/apache/domlogs/{domain}"]:
@@ -271,15 +284,15 @@ with open(domains_file) as f:
         if logfile:
             counter = Counter()
             try:
-                with open(logfile, 'r', encoding='utf-8', errors='ignore') as lf:
+                with open(logfile, "r", encoding="utf-8", errors="ignore") as lf:
                     for l in lf:
                         if any(p in l for p in patterns):
-                            m = re.search(r'"(GET|HEAD)\s+([^\s]+)', l)
+                            m = re.search(r"\"(GET|HEAD)\s+([^\s]+)", l)
                             if m:
                                 method, raw_url = m.groups()
-                                path_clean = raw_url.split('#')[0]
-                                path_no_q = path_clean.split('?')[0].lower()
-                                if path_clean == '/' or path_clean == '':
+                                path_clean = raw_url.split("#")[0]
+                                path_no_q = path_clean.split("?")[0].lower()
+                                if path_clean == "/" or path_clean == "":
                                     continue
                                 if any(path_no_q.endswith(ext) for ext in static_exts):
                                     continue
@@ -299,7 +312,7 @@ with open(domains_file) as f:
 with open(urls_file, "w") as f:
     for u in urls_out:
         f.write(u + "\n")
-PY
+' "$DOMAINS_FILE" "$PATTERNS_FILE" "$MINUTES" "$URLS_FILE" </dev/null
 
 echo "URLs de prueba seguras seleccionadas."
 log "URLs de prueba guardadas en $URLS_FILE"
@@ -325,7 +338,7 @@ run_http_test() {
         --max-time 20 \
         -o /dev/null \
         -w "%{http_code}\t%{url_effective}\t%{num_redirects}\t%{time_starttransfer}\t%{time_total}\n" \
-        "$full_url" 2>/dev/null > "$tmp" || echo -e "000\t${full_url}\t0\t0.000\t0.000" > "$tmp"
+        "$full_url" </dev/null 2>/dev/null > "$tmp" || echo -e "000\t${full_url}\t0\t0.000\t0.000" > "$tmp"
 
     local code eff_url redirects ttfb total
     read -r code eff_url redirects ttfb total < "$tmp"
@@ -355,7 +368,7 @@ log "Baseline pre-migración guardado en $HTTP_BEFORE_FILE"
 
 stage "5" "18" "EVALUACIÓN DE MIGRACIÓN A PHP-FPM"
 
-python3 - "$DOMAINS_FILE" "$HTTP_BEFORE_FILE" "$MIGRATION_CANDIDATES" <<'PY'
+python3 -c '
 import sys, csv
 from collections import defaultdict
 
@@ -392,7 +405,7 @@ with open(domains_file) as f, open(candidates_file, "w", newline="") as out:
             cat = "SPECIAL"
 
         w.writerow([domain, account, version, fpm, source, suspended, handler, yaml_path, fpm_pkg_installed, cat])
-PY
+' "$DOMAINS_FILE" "$HTTP_BEFORE_FILE" "$MIGRATION_CANDIDATES" </dev/null
 
 echo
 printf "%-32s %-12s %-10s %-10s %-18s %-15s\n" \
@@ -432,7 +445,7 @@ ENABLE_MIGRATION=0
 
 if [[ "$CAN_MIGRATE_COUNT" -gt 0 || "$NEEDS_PKG_COUNT" -gt 0 ]]; then
     echo -e "${YELLOW}Se detectaron dominios que actualmente no utilizan PHP-FPM.${RESET}"
-    read -r -p "¿Deseas habilitar PHP-FPM en los dominios compatibles que actualmente no lo utilizan? [y/N]: " CONFIRM_MIG
+    prompt_user "¿Deseas habilitar PHP-FPM en los dominios compatibles que actualmente no lo utilizan? [y/N]: " CONFIRM_MIG
     case "$CONFIRM_MIG" in
         y|Y|yes|YES)
             ENABLE_MIGRATION=1
@@ -464,16 +477,16 @@ if [[ "$ENABLE_MIGRATION" == "1" && "$NEEDS_PKG_COUNT" -gt 0 ]]; then
     done
     echo
 
-    read -r -p "¿Deseas instalar estos paquetes mediante EasyApache/YUM/DNF? [y/N]: " CONFIRM_PKG
+    prompt_user "¿Deseas instalar estos paquetes mediante EasyApache/YUM/DNF? [y/N]: " CONFIRM_PKG
     case "$CONFIRM_PKG" in
         y|Y|yes|YES)
             echo "Instalando paquetes FPM faltantes..."
             log "Instalando paquetes: $MISSING_PKGS"
-            if yum install -y $MISSING_PKGS >> "$LOG_FILE" 2>&1; then
+            if yum install -y $MISSING_PKGS </dev/null >> "$LOG_FILE" 2>&1; then
                 echo -e "${GREEN}Paquetes instalados correctamente.${RESET}"
                 INSTALLED_NEW_PKGS=1
                 # Actualizar candidates
-                python3 - "$MIGRATION_CANDIDATES" <<'PY'
+                python3 -c '
 import sys, os, csv
 
 candidates_file = sys.argv[1]
@@ -481,18 +494,19 @@ rows = []
 with open(candidates_file) as f:
     r = csv.DictReader(f, delimiter="\t")
     for row in r:
-        fpm_bin = f"/opt/cpanel/{row['version']}/root/usr/sbin/php-fpm"
+        ver = row["version"]
+        fpm_bin = f"/opt/cpanel/{ver}/root/usr/sbin/php-fpm"
         if os.path.isfile(fpm_bin):
-            row['fpm_pkg_installed'] = '1'
-            if row['category'] == 'NEEDS_FPM_PKG':
-                row['category'] = 'CAN_ENABLE_FPM'
+            row["fpm_pkg_installed"] = "1"
+            if row["category"] == "NEEDS_FPM_PKG":
+                row["category"] = "CAN_ENABLE_FPM"
         rows.append(row)
 
 with open(candidates_file, "w", newline="") as out:
     w = csv.DictWriter(out, fieldnames=list(rows[0].keys()), delimiter="\t")
     w.writeheader()
     w.writerows(rows)
-PY
+' "$MIGRATION_CANDIDATES" </dev/null
             else
                 echo -e "${RED}Error al instalar paquetes FPM. Omitiendo esos dominios.${RESET}"
                 log "Error en yum install FPM pkgs."
@@ -535,7 +549,7 @@ if [[ "$ENABLE_MIGRATION" == "1" ]]; then
         log "$DOMAIN | Activando FPM | version=$VERSION | source=$SOURCE"
 
         # 1. Invocación WHM API
-        RESULT="$(whmapi1 --output=json php_set_vhost_versions version="$VERSION" vhost="$DOMAIN" php_fpm=1 2>&1)"
+        RESULT="$(whmapi1 --output=json php_set_vhost_versions version="$VERSION" vhost="$DOMAIN" php_fpm=1 </dev/null 2>&1)"
         echo "$RESULT" >> "$LOG_FILE"
 
         API_STATUS="$(printf '%s' "$RESULT" | python3 -c '
@@ -563,7 +577,7 @@ except Exception:
             run_http_test "$DOMAIN" "$DOM_PATH" "$HTTP_AFTER_FILE"
 
             # Comparar pre vs post para esta URL
-            python3 - "$HTTP_BEFORE_FILE" "$HTTP_AFTER_FILE" "$DOMAIN" "$DOM_PATH" "$HTTP_COMPARE_FILE" <<'PY'
+            python3 -c '
 import sys, csv
 
 before_file, after_file, domain, path, compare_file = sys.argv[1:6]
@@ -604,7 +618,7 @@ with open(compare_file, "a", newline="") as out:
 
 if status == "REGRESSION_CRITICAL":
     sys.exit(2)
-PY
+' "$HTTP_BEFORE_FILE" "$HTTP_AFTER_FILE" "$DOMAIN" "$DOM_PATH" "$HTTP_COMPARE_FILE" </dev/null
             RC=$?
             if [[ $RC -eq 2 ]]; then
                 HAS_REGRESSION=1
@@ -616,7 +630,7 @@ PY
             log "$DOMAIN | REGRESSION_CRITICAL | Realizando rollback de FPM..."
 
             # Rollback unitario
-            whmapi1 --output=json php_set_vhost_versions version="$VERSION" vhost="$DOMAIN" php_fpm=0 >> "$LOG_FILE" 2>&1
+            whmapi1 --output=json php_set_vhost_versions version="$VERSION" vhost="$DOMAIN" php_fpm=0 </dev/null >> "$LOG_FILE" 2>&1
             echo -e "  Rollback: ${YELLOW}PHP-FPM desactivado para $DOMAIN (versión $VERSION preservada).${RESET}"
             log "$DOMAIN | ROLLED_BACK"
 
@@ -643,7 +657,7 @@ fi
 
 stage "9" "18" "Obteniendo snapshot final post-migración..."
 
-if ! whmapi1 --output=json php_get_vhost_versions > "$AFTER_MIGRATION_JSON" 2>>"$LOG_FILE"; then
+if ! whmapi1 --output=json php_get_vhost_versions </dev/null > "$AFTER_MIGRATION_JSON" 2>>"$LOG_FILE"; then
     die "No fue posible obtener el snapshot final post-migración."
 fi
 
@@ -706,7 +720,7 @@ stage "11" "18" "Warm-up inicial y primera muestra para pools recién creados...
 
 # Enviar solicitudes GET livianas a dominios recién migrados
 while IFS=$'\t' read -r DOMAIN PATH; do
-    curl -kLsS --connect-timeout 2 --max-time 3 "https://${DOMAIN}${PATH}" >/dev/null 2>&1 || true
+    curl -kLsS --connect-timeout 2 --max-time 3 "https://${DOMAIN}${PATH}" </dev/null >/dev/null 2>&1 || true
 done < "$URLS_FILE"
 
 sleep 1
@@ -877,7 +891,7 @@ done >> "$TRAFFIC_FILE"
 # HTTP performance metrics (resumido de baseline)
 printf "domain\thttp_ok\tavg_total_s\tmax_total_s\tavg_ttfb_s\n" > "$HTTP_PERF_FILE"
 
-python3 - "$HTTP_BEFORE_FILE" "$HTTP_PERF_FILE" <<'PY'
+python3 -c '
 import sys, csv
 from collections import defaultdict
 
@@ -903,10 +917,10 @@ with open(perf_file, "w", newline="") as out:
         max_tot = max(v[1] for v in vals)
         avg_ttfb = sum(v[2] for v in vals) / ok_count
         w.writerow([dom, ok_count, f"{avg_tot:.3f}", f"{max_tot:.3f}", f"{avg_ttfb:.3f}"])
-PY
+' "$HTTP_BEFORE_FILE" "$HTTP_PERF_FILE" </dev/null
 
 # Merge de todas las métricas
-python3 - "$POOLS_FILE" "$MEMORY_FILE" "$TRAFFIC_FILE" "$HTTP_PERF_FILE" "$HITS_FILE" "$MERGED_FILE" <<'PY'
+python3 -c '
 import csv, sys
 
 paths = sys.argv[1:6]
@@ -936,7 +950,7 @@ with open(out, "w", newline="") as f:
                     http.get(domain,{}), hits.get(domain,{})):
             row.update(src)
         w.writerow({k: row.get(k, "0") for k in fields})
-PY
+' "$POOLS_FILE" "$MEMORY_FILE" "$TRAFFIC_FILE" "$HTTP_PERF_FILE" "$HITS_FILE" "$MERGED_FILE" </dev/null
 
 # ============================================================
 # ETAPA 13: CÁLCULO DE RECOMENDACIONES DE OPTIMIZACIÓN
@@ -944,7 +958,7 @@ PY
 
 stage "13" "18" "Calculando recomendaciones inteligentes (pm.max_children y pm.max_requests)..."
 
-python3 - "$SYSTEM_ENV" "$MERGED_FILE" "$RECS_FILE" <<'PY'
+python3 -c '
 import csv, math, sys
 
 system_path, merged_path, out_path = sys.argv[1:4]
@@ -999,7 +1013,6 @@ def num(r, k, default=0.0):
     try: return float(r.get(k) or default)
     except: return default
 
-# Calcular mediana de RAM medida en el servidor como fallback conservador
 measured_mems = [num(r, "p90_mb") or num(r, "avg_mb") for r in rows if num(r, "workers") > 0]
 server_median_mem = sorted(measured_mems)[len(measured_mems)//2] if measured_mems else 64.0
 server_median_mem = max(48.0, min(128.0, server_median_mem))
@@ -1038,7 +1051,6 @@ for r in rows:
 
     desired = int(math.ceil(demand))
 
-    # Límite conservador para pools recién creados
     if pool_type == "NEW_FPM_POOL":
         desired = min(desired, 4)
 
@@ -1169,7 +1181,7 @@ with open(out_path, "w", newline="") as f:
             "estimated_pool_max_mb": "%.1f" % (rec * mem),
             "reason": "; ".join(reasons)
         })
-PY
+' "$SYSTEM_ENV" "$MERGED_FILE" "$RECS_FILE" </dev/null
 
 # ============================================================
 # ETAPA 14: PRESENTACIÓN Y CONFIRMACIÓN DE TUNING
@@ -1211,7 +1223,7 @@ echo "  5) Se verificará la coincidencia en los .conf generados"
 echo "  6) Si ocurre algún fallo, se aplicará ROLLBACK AUTOMÁTICO"
 echo
 
-read -r -p "Escribe APLICAR para confirmar los cambios de tuning, o cualquier otra cosa para salir: " CONFIRM_TUNING
+prompt_user "Escribe APLICAR para confirmar los cambios de tuning, o cualquier otra cosa para salir: " CONFIRM_TUNING
 
 if [[ "$CONFIRM_TUNING" != "APLICAR" ]]; then
     echo "Proceso finalizado sin aplicar tuning."
@@ -1233,7 +1245,7 @@ update_yaml() {
     local children="$2"
     local requests="$3"
 
-    python3 - "$yaml" "$children" "$requests" <<'PY'
+    python3 -c '
 import os, re, sys, tempfile
 
 path, children, requests = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
@@ -1280,7 +1292,7 @@ finally:
     if os.path.exists(tmp):
         try: os.unlink(tmp)
         except: pass
-PY
+' "$yaml" "$children" "$requests" </dev/null
 }
 
 rollback_yamls() {
@@ -1292,9 +1304,9 @@ rollback_yamls() {
             echo "  Restaurado $dom -> $yaml"
         fi
     done
-    /usr/local/cpanel/scripts/php_fpm_config --rebuild >/dev/null 2>&1 || true
-    /usr/local/cpanel/scripts/restartsrv_apache_php_fpm --hard >/dev/null 2>&1 || true
-    /usr/local/cpanel/scripts/restartsrv_httpd --hard >/dev/null 2>&1 || true
+    /usr/local/cpanel/scripts/php_fpm_config --rebuild </dev/null >/dev/null 2>&1 || true
+    /usr/local/cpanel/scripts/restartsrv_apache_php_fpm --hard </dev/null >/dev/null 2>&1 || true
+    /usr/local/cpanel/scripts/restartsrv_httpd --hard </dev/null >/dev/null 2>&1 || true
     log "Rollback de YAMLs completado."
 }
 
@@ -1327,21 +1339,21 @@ CHANGED_COUNT=$(( $(wc -l < "$CHANGED_LIST") - 1 ))
 if [ "$CHANGED_COUNT" -gt 0 ]; then
     echo
     echo "Ejecutando cPanel php_fpm_config --rebuild..."
-    if ! /usr/local/cpanel/scripts/php_fpm_config --rebuild >> "$LOG_FILE" 2>&1; then
+    if ! /usr/local/cpanel/scripts/php_fpm_config --rebuild </dev/null >> "$LOG_FILE" 2>&1; then
         echo -e "${RED}ERROR: php_fpm_config --rebuild falló.${RESET}"
         rollback_yamls
         exit 1
     fi
 
     echo "Reiniciando Apache PHP-FPM..."
-    if ! /usr/local/cpanel/scripts/restartsrv_apache_php_fpm --hard >> "$LOG_FILE" 2>&1; then
+    if ! /usr/local/cpanel/scripts/restartsrv_apache_php_fpm --hard </dev/null >> "$LOG_FILE" 2>&1; then
         echo -e "${RED}ERROR: fallo reinicio de Apache PHP-FPM.${RESET}"
         rollback_yamls
         exit 1
     fi
 
     echo "Reiniciando Apache Web Server..."
-    if ! /usr/local/cpanel/scripts/restartsrv_httpd --hard >> "$LOG_FILE" 2>&1; then
+    if ! /usr/local/cpanel/scripts/restartsrv_httpd --hard </dev/null >> "$LOG_FILE" 2>&1; then
         echo -e "${RED}ERROR: fallo reinicio de Apache.${RESET}"
         rollback_yamls
         exit 1
@@ -1386,7 +1398,7 @@ fi
 stage "18" "18" "REPORTE FINAL Y RESUMEN DE EJECUCIÓN"
 
 # Generar CSV final unificado
-python3 - "$DOMAINS_FILE" "$RECS_FILE" "$CHANGED_LIST" "$HTTP_COMPARE_FILE" "$REPORT_CSV" <<'PY'
+python3 -c '
 import sys, csv
 
 domains_file, recs_file, changed_file, compare_file, csv_out = sys.argv[1:6]
@@ -1435,7 +1447,7 @@ with open(csv_out, "w", newline="") as f:
                 "cur_children", "rec_children", "cur_requests", "rec_requests",
                 "data_confidence", "tuning_reason"])
     w.writerows(rows)
-PY
+' "$DOMAINS_FILE" "$RECS_FILE" "$CHANGED_LIST" "$HTTP_COMPARE_FILE" "$REPORT_CSV" </dev/null
 
 echo
 hr
