@@ -65,17 +65,17 @@ CHANGED_LIST="${WORKDIR}/applied_changes.tsv"
 REPORT_CSV="${WORKDIR}/report.csv"
 
 # ============================================================
-# FORMATO Y COLORES (TTY DEPENDIENTE)
+# FORMATO Y COLORES (TTY DEPENDIENTE CON ANSI-C QUOTING)
 # ============================================================
 
 if [[ -t 1 ]]; then
-    RED='\033[0;31m'
-    GREEN='\033[0;32m'
-    YELLOW='\033[1;33m'
-    BLUE='\033[0;34m'
-    CYAN='\033[0;36m'
-    BOLD='\033[1m'
-    RESET='\033[0m'
+    RED=$(printf '\033[0;31m')
+    GREEN=$(printf '\033[0;32m')
+    YELLOW=$(printf '\033[1;33m')
+    BLUE=$(printf '\033[0;34m')
+    CYAN=$(printf '\033[0;36m')
+    BOLD=$(printf '\033[1m')
+    RESET=$(printf '\033[0m')
 else
     RED=''
     GREEN=''
@@ -134,7 +134,7 @@ stage "1" "18" "Validaciones del servidor..."
 command -v whmapi1 >/dev/null 2>&1 || die "No se encontró 'whmapi1'. ¿Es un servidor cPanel/WHM?"
 command -v python3 >/dev/null 2>&1 || die "No se encontró 'python3'."
 
-for cmd in awk sed grep find sort ps curl free nproc date cp rpm; do
+for cmd in awk sed grep find sort ps curl free nproc date cp rpm column; do
     command -v "$cmd" >/dev/null 2>&1 || die "Falta la herramienta requerida: $cmd"
 done
 
@@ -407,11 +407,8 @@ with open(domains_file) as f, open(candidates_file, "w", newline="") as out:
         w.writerow([domain, account, version, fpm, source, suspended, handler, yaml_path, fpm_pkg_installed, cat])
 ' "$DOMAINS_FILE" "$HTTP_BEFORE_FILE" "$MIGRATION_CANDIDATES" </dev/null
 
-echo
-printf "%-32s %-12s %-10s %-10s %-18s %-15s\n" \
-    "DOMINIO" "CUENTA" "PHP" "HANDLER" "PAQUETE FPM" "ESTADO FPM"
-printf "%-32s %-12s %-10s %-10s %-18s %-15s\n" \
-    "--------------------------------" "------------" "----------" "----------" "------------------" "---------------"
+CAND_TABLE="$WORKDIR/cand_table.tsv"
+printf "DOMINIO\tCUENTA\tPHP\tHANDLER\tPAQUETE FPM\tESTADO FPM\n" > "$CAND_TABLE"
 
 sed -i 's/\r$//' "$MIGRATION_CANDIDATES" 2>/dev/null || true
 
@@ -422,24 +419,27 @@ while IFS=$'\t' read -r DOMAIN ACCOUNT VERSION FPM SOURCE SUSPENDED HANDLER YAML
     PKG_NAME="${VERSION}-php-fpm"
 
     if [[ "$CAT_CLEAN" == "ALREADY_FPM" ]]; then
-        STATUS_TEXT="${GREEN}FPM ACTIVO${RESET}"
+        STATUS_TEXT="FPM ACTIVO"
     elif [[ "$CAT_CLEAN" == "CAN_ENABLE_FPM" ]]; then
-        STATUS_TEXT="${YELLOW}LISTO PARA MIGRAR${RESET}"
+        STATUS_TEXT="LISTO PARA MIGRAR"
     elif [[ "$CAT_CLEAN" == "NEEDS_FPM_PKG" ]]; then
-        STATUS_TEXT="${RED}FALTA PAQUETE${RESET}"
+        STATUS_TEXT="FALTA PAQUETE"
     elif [[ "$CAT_CLEAN" == "SUSPENDED" ]]; then
-        STATUS_TEXT="${YELLOW}SUSPENDIDO${RESET}"
+        STATUS_TEXT="SUSPENDIDO"
     else
         STATUS_TEXT="ESPECIAL"
     fi
 
-    PKG_TEXT="INSTALADO"
-    [[ "$PKG_INST" == "0" ]] && PKG_TEXT="${RED}NO INSTALADO${RESET}"
-
-    printf "%-32s %-12s %-10s %-10s %-18s %-15s\n" \
-        "$DOM_CLEAN" "$ACCOUNT" "$VERSION" "$HANDLER" "$PKG_NAME" "$STATUS_TEXT"
+    printf "%s\t%s\t%s\t%s\t%s\t%s\n" \
+        "$DOM_CLEAN" "$ACCOUNT" "$VERSION" "$HANDLER" "$PKG_NAME" "$STATUS_TEXT" >> "$CAND_TABLE"
 done < "$MIGRATION_CANDIDATES"
 
+echo
+column -t -s $'\t' "$CAND_TABLE" | awk 'NR==1 {print $0; line=""; for(i=1;i<=length($0);i++) line=line "-"; print line; next} {print $0}' | sed \
+    -e "s/LISTO PARA MIGRAR/${YELLOW}LISTO PARA MIGRAR${RESET}/g" \
+    -e "s/FPM ACTIVO/${GREEN}FPM ACTIVO${RESET}/g" \
+    -e "s/FALTA PAQUETE/${RED}FALTA PAQUETE${RESET}/g" \
+    -e "s/SUSPENDIDO/${YELLOW}SUSPENDIDO${RESET}/g"
 echo
 
 CAN_MIGRATE_COUNT=$(awk -F'\t' '{gsub(/\r/,""); if($10=="CAN_ENABLE_FPM") c++} END {print c+0}' "$MIGRATION_CANDIDATES")
@@ -1211,18 +1211,25 @@ with open(out_path, "w", newline="") as f:
 
 stage "14" "18" "RECOMENDACIONES DE OPTIMIZACIÓN DE POOLS"
 
-echo
-printf "%-32s %-12s %-12s %-16s %-16s %-6s %-6s %-6s %-6s %-7s %-8s %-6s\n" \
-    "DOMINIO" "TIPO POOL" "CONFIANZA" "TRÁFICO" "ELEGIBILIDAD" "CUR_CH" "REC_CH" "CUR_RQ" "REC_RQ" "WORKERS" "MEM_MB" "HITS"
-printf "%-32s %-12s %-12s %-16s %-16s %-6s %-6s %-6s %-6s %-7s %-8s %-6s\n" \
-    "--------------------------------" "------------" "------------" "----------------" "----------------" "------" "------" "------" "------" "-------" "--------" "------"
+RECS_TABLE="$WORKDIR/recs_table.tsv"
+printf "DOMINIO\tTIPO POOL\tCONFIANZA\tTRÁFICO\tELEGIBILIDAD\tCUR_CH\tREC_CH\tCUR_RQ\tREC_RQ\tWORKERS\tMEM_MB\tHITS\n" > "$RECS_TABLE"
+
+sed -i 's/\r$//' "$RECS_FILE" 2>/dev/null || true
 
 tail -n +2 "$RECS_FILE" | while IFS=$'\t' read -r dom phpver yaml ptype conf msrc tdata cc raw_rec guard_rec final_ch cr rr workers mem peak htt hits est eligibility reason; do
-    printf "%-32s %-12s %-12s %-16s %-16s %-6s %-6s %-6s %-6s %-7s %-8s %-6s\n" \
-        "$dom" "$ptype" "$conf" "$tdata" "$eligibility" "$cc" "$final_ch" "$cr" "$rr" "$workers" "$mem" "$hits"
+    [ "$dom" = "domain" ] && continue
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+        "$dom" "$ptype" "$conf" "$tdata" "$eligibility" "$cc" "$final_ch" "$cr" "$rr" "$workers" "$mem" "$hits" >> "$RECS_TABLE"
 done
 
 echo
+column -t -s $'\t' "$RECS_TABLE" | awk 'NR==1 {print $0; line=""; for(i=1;i<=length($0);i++) line=line "-"; print line; next} {print $0}' | sed \
+    -e "s/SAFE_TO_APPLY/${GREEN}SAFE_TO_APPLY${RESET}/g" \
+    -e "s/REVIEW_RECOMMENDED/${YELLOW}REVIEW_RECOMMENDED${RESET}/g" \
+    -e "s/INSUFFICIENT_DATA/${RED}INSUFFICIENT_DATA${RESET}/g" \
+    -e "s/NO_CHANGE/${CYAN}NO_CHANGE${RESET}/g"
+echo
+
 echo "Detalle de decisiones por dominio:"
 tail -n +2 "$RECS_FILE" | while IFS=$'\t' read -r dom phpver yaml ptype conf msrc tdata cc raw_rec guard_rec final_ch cr rr workers mem peak htt hits est eligibility reason; do
     echo "  - $dom [$eligibility]: $reason"
