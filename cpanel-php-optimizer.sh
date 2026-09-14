@@ -274,41 +274,39 @@ with open(domains_file) as f:
             continue
         domain = parts[0]
 
-        logfile = None
-        cands = [
-            f"/var/log/nginx/domains/{domain}", f"/var/log/nginx/domains/{domain}.log",
-            f"/etc/apache2/logs/domlogs/{domain}", f"/usr/local/apache/domlogs/{domain}"
-        ]
-        for pattern in [f"/etc/apache2/logs/domlogs/*/{domain}", f"/usr/local/apache/domlogs/*/{domain}"]:
-            cands.extend(glob.glob(pattern))
-
-        for cand in cands:
-            if os.path.isfile(cand):
-                logfile = cand
-                break
+        logfiles = []
+        for base in ["/etc/apache2/logs/domlogs", "/usr/local/apache/domlogs", "/var/log/apache2/domlogs", "/var/log/nginx/domains"]:
+            if not os.path.isdir(base):
+                continue
+            for root, _, files in os.walk(base):
+                for fn in files:
+                    if (fn == domain or fn.startswith(f"{domain}.") or fn.startswith(f"{domain}-")) and not fn.endswith(("-bytes_log", ".offsetftpsep", ".bkp", ".gz", ".zip", ".tar")):
+                        full = os.path.join(root, fn)
+                        if os.path.isfile(full):
+                            logfiles.append(full)
 
         selected = ["/"]
-
-        if logfile:
+        if logfiles:
             counter = Counter()
-            try:
-                with open(logfile, "r", encoding="utf-8", errors="ignore") as lf:
-                    for l in lf:
-                        if any(p in l for p in patterns):
-                            m = re.search(r"\"(GET|HEAD)\s+([^\s]+)", l)
-                            if m:
-                                method, raw_url = m.groups()
-                                path_clean = raw_url.split("#")[0]
-                                path_no_q = path_clean.split("?")[0].lower()
-                                if path_clean == "/" or path_clean == "":
-                                    continue
-                                if any(path_no_q.endswith(ext) for ext in static_exts):
-                                    continue
-                                if any(term in path_clean.lower() for term in sensitive_terms):
-                                    continue
-                                counter[path_clean] += 1
-            except Exception:
-                pass
+            for logfile in logfiles:
+                try:
+                    with open(logfile, "r", encoding="utf-8", errors="ignore") as lf:
+                        for l in lf:
+                            if any(p in l for p in patterns):
+                                m = re.search(r"\"(GET|HEAD)\s+([^\s]+)", l)
+                                if m:
+                                    method, raw_url = m.groups()
+                                    path_clean = raw_url.split("#")[0]
+                                    path_no_q = path_clean.split("?")[0].lower()
+                                    if path_clean == "/" or path_clean == "":
+                                        continue
+                                    if any(path_no_q.endswith(ext) for ext in static_exts):
+                                        continue
+                                    if any(term in path_clean.lower() for term in sensitive_terms):
+                                        continue
+                                    counter[path_clean] += 1
+                except Exception:
+                    pass
 
             for url_cand, _ in counter.most_common(3):
                 if url_cand not in selected:
@@ -853,41 +851,33 @@ done >> "$HITS_FILE"
 printf "domain\ttraffic_log\ttraffic_source\ttotal_reqs\tdynamic_reqs\tavg_dyn_rpm\tpeak_dyn_rpm\terrors\ttraffic_data\n" > "$TRAFFIC_FILE"
 
 tail -n +2 "$POOLS_FILE" | cut -f1 | while read -r domain; do
-    logfile=""
+    logfiles=()
     source_type="NONE"
-    for candidate in \
-        "/var/log/nginx/domains/$domain" \
-        "/var/log/nginx/domains/${domain}.log"; do
-        if [ -f "$candidate" ]; then
-            logfile="$candidate"
-            source_type="NGINX"
-            break
-        fi
+
+    for base in /etc/apache2/logs/domlogs /usr/local/apache/domlogs /var/log/apache2/domlogs /var/log/nginx/domains; do
+        [ -d "$base" ] || continue
+        while IFS= read -r f; do
+            [ -f "$f" ] && logfiles+=("$f")
+        done < <(find "$base" -maxdepth 2 -type f \( -name "$domain" -o -name "${domain}.*" -o -name "${domain}-*" \) ! -name "*-bytes_log" ! -name "*.offset*" ! -name "*.bkp" ! -name "*.gz" 2>/dev/null)
     done
 
-    if [ -z "$logfile" ]; then
-        for candidate in \
-            "/etc/apache2/logs/domlogs/$domain" \
-            /etc/apache2/logs/domlogs/*/"$domain" \
-            "/usr/local/apache/domlogs/$domain" \
-            /usr/local/apache/domlogs/*/"$domain"; do
-            if [ -f "$candidate" ]; then
-                logfile="$candidate"
-                source_type="APACHE"
-                break
-            fi
+    if [ "${#logfiles[@]}" -gt 0 ]; then
+        source_type="APACHE"
+        for f in "${logfiles[@]}"; do
+            case "$f" in
+                *nginx*) source_type="NGINX"; break ;;
+            esac
         done
-    fi
 
-    if [ -n "$logfile" ]; then
         tmp="$WORKDIR/log.$$.tmp"
-        grep -Ff "$PATTERNS_FILE" "$logfile" 2>/dev/null > "$tmp" || true
+        cat "${logfiles[@]}" 2>/dev/null | grep -Ff "$PATTERNS_FILE" 2>/dev/null > "$tmp" || true
         total_reqs=$(wc -l < "$tmp")
 
+        first_log="${logfiles[0]}"
         if [ "$total_reqs" -eq 0 ]; then
-            printf "%s\t%s\t%s\t0\t0\t0\t0\t0\tMEASURED_ZERO\n" "$domain" "$logfile" "$source_type"
+            printf "%s\t%s\t%s\t0\t0\t0\t0\t0\tMEASURED_ZERO\n" "$domain" "$first_log" "$source_type"
         else
-            awk -v d="$domain" -v logf="$logfile" -v stype="$source_type" -v mins="$MINUTES" -F'"' '
+            awk -v d="$domain" -v logf="$first_log" -v stype="$source_type" -v mins="$MINUTES" -F'"' '
             {
                 split($2,a," ")
                 url=a[2]
