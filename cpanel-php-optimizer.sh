@@ -246,7 +246,8 @@ stage "3" "18" "Analizando tráfico reciente y seleccionando URLs de prueba segu
 PATTERNS_FILE="$WORKDIR/time_patterns"
 : > "$PATTERNS_FILE"
 for i in $(seq 0 $((MINUTES-1))); do
-    date -d "$i minutes ago" '+[%d/%b/%Y:%H:%M:' >> "$PATTERNS_FILE"
+    LC_ALL=C date -d "$i minutes ago" '+[%d/%b/%Y:%H:%M:' >> "$PATTERNS_FILE"
+    LC_ALL=C date -u -d "$i minutes ago" '+[%d/%b/%Y:%H:%M:' >> "$PATTERNS_FILE"
 done
 
 # Seleccionar URLs seguras por dominio
