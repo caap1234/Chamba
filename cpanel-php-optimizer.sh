@@ -275,8 +275,14 @@ with open(domains_file) as f:
         domain = parts[0]
 
         logfile = None
-        for cand in [f"/var/log/nginx/domains/{domain}", f"/var/log/nginx/domains/{domain}.log",
-                     f"/etc/apache2/logs/domlogs/{domain}", f"/usr/local/apache/domlogs/{domain}"]:
+        cands = [
+            f"/var/log/nginx/domains/{domain}", f"/var/log/nginx/domains/{domain}.log",
+            f"/etc/apache2/logs/domlogs/{domain}", f"/usr/local/apache/domlogs/{domain}"
+        ]
+        for pattern in [f"/etc/apache2/logs/domlogs/*/{domain}", f"/usr/local/apache/domlogs/*/{domain}"]:
+            cands.extend(glob.glob(pattern))
+
+        for cand in cands:
             if os.path.isfile(cand):
                 logfile = cand
                 break
@@ -782,8 +788,9 @@ printf "domain\tworkers\ttotal_mb\tavg_mb\tp90_mb\tmax_mb\tmem_source\tconfidenc
 
 tail -n +2 "$POOLS_FILE" | while IFS=$'\t' read -r domain phpver conf cc cr pm idle yaml pool_type; do
     vals="$WORKDIR/rss.$$.txt"
-    ps -eo rss,args | awk -v pool="$domain" '
-        index($0, "php-fpm: pool " pool) {printf "%.3f\n",$1/1024}
+    domain_underscore=$(echo "$domain" | tr '.' '_')
+    ps -eo rss,args | awk -v pool1="$domain" -v pool2="$domain_underscore" '
+        index($0, "php-fpm: pool " pool1) || index($0, "php-fpm: pool " pool2) {printf "%.3f\n",$1/1024}
     ' | sort -n > "$vals"
 
     workers=$(wc -l < "$vals")
@@ -829,12 +836,13 @@ done >> "$MEMORY_FILE"
 printf "domain\thits_max_children\n" > "$HITS_FILE"
 tail -n +2 "$POOLS_FILE" | cut -f1 | while read -r domain; do
     hits=0
+    domain_underscore=$(echo "$domain" | tr '.' '_')
     for logfile in \
         /opt/cpanel/ea-php*/root/usr/var/log/php-fpm/error.log \
         /opt/cpanel/ea-php*/root/usr/var/log/php-fpm/*.log \
         /var/log/php-fpm* /var/log/php-fpm/*; do
         [ -f "$logfile" ] || continue
-        n=$(grep -Fi "[pool $domain]" "$logfile" 2>/dev/null \
+        n=$(grep -Fi -e "[pool $domain]" -e "[pool $domain_underscore]" "$logfile" 2>/dev/null \
             | grep -iEc 'server reached pm\.max_children|max_children.*reached|seems busy' || true)
         hits=$((hits+n))
     done
@@ -860,7 +868,9 @@ tail -n +2 "$POOLS_FILE" | cut -f1 | while read -r domain; do
     if [ -z "$logfile" ]; then
         for candidate in \
             "/etc/apache2/logs/domlogs/$domain" \
-            "/usr/local/apache/domlogs/$domain"; do
+            /etc/apache2/logs/domlogs/*/"$domain" \
+            "/usr/local/apache/domlogs/$domain" \
+            /usr/local/apache/domlogs/*/"$domain"; do
             if [ -f "$candidate" ]; then
                 logfile="$candidate"
                 source_type="APACHE"
