@@ -278,7 +278,7 @@ with open(domains_file) as f:
         for base in ["/etc/apache2/logs/domlogs", "/usr/local/apache/domlogs", "/var/log/apache2/domlogs", "/var/log/nginx/domains"]:
             if not os.path.isdir(base):
                 continue
-            for root, _, files in os.walk(base):
+            for root, _, files in os.walk(base, followlinks=True):
                 for fn in files:
                     if (fn == domain or fn.startswith(f"{domain}.") or fn.startswith(f"{domain}-")) and not fn.endswith(("-bytes_log", ".offsetftpsep", ".bkp", ".gz", ".zip", ".tar")):
                         full = os.path.join(root, fn)
@@ -858,7 +858,7 @@ tail -n +2 "$POOLS_FILE" | cut -f1 | while read -r domain; do
         [ -d "$base" ] || continue
         while IFS= read -r f; do
             [ -f "$f" ] && logfiles+=("$f")
-        done < <(find "$base" -maxdepth 2 -type f \( -name "$domain" -o -name "${domain}.*" -o -name "${domain}-*" \) ! -name "*-bytes_log" ! -name "*.offset*" ! -name "*.bkp" ! -name "*.gz" 2>/dev/null)
+        done < <(find -L "$base" -maxdepth 3 -type f \( -name "$domain" -o -name "${domain}.*" -o -name "${domain}-*" \) ! -name "*-bytes_log" ! -name "*.offset*" ! -name "*.bkp" ! -name "*.gz" 2>/dev/null)
     done
 
     if [ "${#logfiles[@]}" -gt 0 ]; then
