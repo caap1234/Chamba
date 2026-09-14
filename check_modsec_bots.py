@@ -83,6 +83,28 @@ SOURCES = {
 
 ALL_BOTS = list(SOURCES.keys())
 
+BOT_USER_AGENTS = {
+    "GPTBot": re.compile(r"GPTBot", re.IGNORECASE),
+    "ChatGPT-User": re.compile(r"ChatGPT-User", re.IGNORECASE),
+    "OAI-SearchBot": re.compile(r"OAI-SearchBot", re.IGNORECASE),
+    "Anthropic": re.compile(r"(ClaudeBot|Claude-Web|anthropic-ai)", re.IGNORECASE),
+    "PerplexityBot": re.compile(r"PerplexityBot", re.IGNORECASE),
+    "Googlebot": re.compile(r"(Googlebot|Google-Extended)", re.IGNORECASE),
+    "Bingbot": re.compile(r"bingbot", re.IGNORECASE),
+    "FacebookMeta": re.compile(r"(FacebookBot|meta-externalagent)", re.IGNORECASE),
+    "Bytespider": re.compile(r"Bytespider", re.IGNORECASE),
+    "CCBot": re.compile(r"CCBot", re.IGNORECASE),
+}
+
+
+def match_user_agent(ua_str):
+    if not ua_str:
+        return None
+    for bot_name, pattern in BOT_USER_AGENTS.items():
+        if pattern.search(ua_str):
+            return bot_name
+    return None
+
 
 def download_json(url):
     req = urllib.request.Request(
@@ -264,18 +286,37 @@ def parse_modsec_audit_log(logfile, bot_lookup, target_domain=None, target_bot=N
     tx_uri = ""
     tx_endpoint = ""
     tx_status = ""
+    tx_ua = ""
     tx_messages = []
 
     in_a = in_b = in_f = in_h = False
 
     def flush_transaction():
-        nonlocal total_tx_parsed, tx_ip, tx_host, tx_method, tx_uri, tx_endpoint, tx_status, tx_messages
+        nonlocal total_tx_parsed, tx_ip, tx_host, tx_method, tx_uri, tx_endpoint, tx_status, tx_ua, tx_messages
         total_tx_parsed += 1
 
-        if tx_ip:
-            bot_match = bot_lookup.match(tx_ip)
-            if bot_match:
-                bot_name, cidr_str = bot_match
+        if tx_ip or tx_ua:
+            ip_match = bot_lookup.match(tx_ip) if tx_ip else None
+            ua_bot = match_user_agent(tx_ua)
+
+            bot_name = None
+            cidr_str = "N/A"
+            detection = "NONE"
+
+            if ip_match and ua_bot:
+                bot_name = ip_match[0]
+                cidr_str = ip_match[1]
+                detection = "IP+UA"
+            elif ip_match:
+                bot_name = ip_match[0]
+                cidr_str = ip_match[1]
+                detection = "IP_OFICIAL"
+            elif ua_bot:
+                bot_name = ua_bot
+                cidr_str = "Desconocida (Sólo UA)"
+                detection = "USER_AGENT"
+
+            if bot_name:
                 norm_host = normalize_host(tx_host)
 
                 domain_matches = True
@@ -293,8 +334,10 @@ def parse_modsec_audit_log(logfile, bot_lookup, target_domain=None, target_bot=N
                     for rule_id, severity in rules_to_report:
                         matches.append({
                             "bot": bot_name,
+                            "detection": detection,
                             "range": cidr_str,
                             "ip": tx_ip,
+                            "user_agent": tx_ua or "-",
                             "host": norm_host or "desconocido",
                             "method": tx_method or "-",
                             "uri": tx_uri or "-",
@@ -310,6 +353,7 @@ def parse_modsec_audit_log(logfile, bot_lookup, target_domain=None, target_bot=N
         tx_uri = ""
         tx_endpoint = ""
         tx_status = ""
+        tx_ua = ""
         tx_messages = []
 
     header_pattern = re.compile(r'^--[0-9a-fA-F]+-([A-Z])--$')
@@ -320,7 +364,7 @@ def parse_modsec_audit_log(logfile, bot_lookup, target_domain=None, target_bot=N
             if m:
                 sec = m.group(1)
                 if sec == 'A':
-                    if tx_ip or tx_host or tx_method or tx_status or tx_messages:
+                    if tx_ip or tx_host or tx_method or tx_status or tx_ua or tx_messages:
                         flush_transaction()
                     in_a, in_b, in_f, in_h = True, False, False, False
                 elif sec == 'Z':
@@ -349,6 +393,8 @@ def parse_modsec_audit_log(logfile, bot_lookup, target_domain=None, target_bot=N
                 if clean_line.lower().startswith("host:"):
                     raw_host = clean_line.split(":", 1)[1]
                     tx_host = normalize_host(raw_host)
+                if clean_line.lower().startswith("user-agent:"):
+                    tx_ua = clean_line.split(":", 1)[1].strip()
 
             elif in_f and not tx_status:
                 clean_line = line.rstrip("\r\n")
@@ -398,18 +444,18 @@ def print_and_format_report(matches, target_domain, logfile, total_tx_parsed, ti
     endpoint_seen = set()
 
     for m in matches:
-        key = (m["endpoint"], m["bot"], m["ip"], m["rule_id"], m["severity"], m["status"])
+        key = (m["endpoint"], m["bot"], m["ip"], m["detection"], m["rule_id"], m["severity"], m["status"])
         combo_counts[key] += 1
         if m["rule_id"] != "-":
             endpoint_rules[m["endpoint"]].add(m["rule_id"])
         endpoint_seen.add(m["endpoint"])
 
-    out(f"{'Endpoint':<40} {'Bot':<15} {'IP':<16} {'Rule ID':<10} {'Severity':<10} {'Status':<8} {'Veces':<6}")
-    out("-" * 109)
+    out(f"{'Endpoint':<35} {'Bot':<15} {'IP':<16} {'Detección':<12} {'Rule ID':<10} {'Severity':<10} {'Status':<8} {'Veces':<6}")
+    out("-" * 116)
 
     sorted_combos = sorted(combo_counts.items(), key=lambda x: (x[0][0], x[0][1], x[0][2]))
-    for (ep, bot, ip, rid, sev, stat), cnt in sorted_combos:
-        out(f"{ep:<40} {bot:<15} {ip:<16} {rid:<10} {sev:<10} {stat:<8} {cnt:<6}")
+    for (ep, bot, ip, det, rid, sev, stat), cnt in sorted_combos:
+        out(f"{ep:<35} {bot:<15} {ip:<16} {det:<12} {rid:<10} {sev:<10} {stat:<8} {cnt:<6}")
 
     out("")
 
