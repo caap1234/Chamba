@@ -161,7 +161,15 @@ class BotLookup:
         self.intervals_v6 = []
         self.starts_v6 = []
 
-        bots_to_load = selected_bots if selected_bots else ALL_BOTS
+        bots_to_load = ALL_BOTS
+        if selected_bots:
+            terms = [b.strip().lower() for b in selected_bots if b.strip()]
+            matched_bots = [
+                s_name for s_name in SOURCES
+                if any(t in s_name.lower() for t in terms)
+            ]
+            if matched_bots:
+                bots_to_load = matched_bots
 
         v4_temp = []
         v6_temp = []
@@ -277,7 +285,8 @@ def parse_modsec_audit_log(logfile, bot_lookup, target_domain=None, target_bot=N
 
                 bot_matches = True
                 if target_bot:
-                    bot_matches = (target_bot.lower() in bot_name.lower())
+                    bot_terms = [b.strip().lower() for b in target_bot.split(",") if b.strip()]
+                    bot_matches = any(t in bot_name.lower() for t in bot_terms)
 
                 if domain_matches and bot_matches:
                     rules_to_report = tx_messages if tx_messages else [("-", "-")]
@@ -504,7 +513,8 @@ def main():
     target_domain = None if args.all else args.dominio
 
     print("Cargando rangos de IPs de bots (OpenAI, Anthropic, Google, Bing, Perplexity, etc.)...")
-    bot_lookup = BotLookup(selected_bots=[args.bot] if args.bot and args.bot in SOURCES else None)
+    bot_list = [b.strip() for b in args.bot.split(",")] if args.bot else None
+    bot_lookup = BotLookup(selected_bots=bot_list)
 
     print(f"Analizando log: {args.logfile} ...")
     matches, total_tx_parsed = parse_modsec_audit_log(
