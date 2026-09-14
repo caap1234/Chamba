@@ -330,8 +330,8 @@ def parse_modsec_audit_log(logfile, bot_lookup, target_domain=None, target_bot=N
                     bot_matches = any(t in bot_name.lower() for t in bot_terms)
 
                 if domain_matches and bot_matches:
-                    rules_to_report = tx_messages if tx_messages else [("-", "-")]
-                    for rule_id, severity in rules_to_report:
+                    rules_to_report = tx_messages if tx_messages else [("-", "-", "-")]
+                    for rule_id, severity, msg_desc in rules_to_report:
                         matches.append({
                             "bot": bot_name,
                             "detection": detection,
@@ -345,6 +345,7 @@ def parse_modsec_audit_log(logfile, bot_lookup, target_domain=None, target_bot=N
                             "status": tx_status or "-",
                             "rule_id": rule_id,
                             "severity": severity,
+                            "rule_msg": msg_desc,
                         })
 
         tx_ip = ""
@@ -406,13 +407,21 @@ def parse_modsec_audit_log(logfile, bot_lookup, target_domain=None, target_bot=N
                 if line.startswith("Message:"):
                     rule_id = "-"
                     severity = "-"
+                    msg_desc = "-"
                     m_id = re.search(r'\[id "([^"]+)"\]', line)
                     if m_id:
                         rule_id = m_id.group(1)
                     m_sev = re.search(r'\[severity "([^"]+)"\]', line)
                     if m_sev:
                         severity = m_sev.group(1)
-                    tx_messages.append((rule_id, severity))
+                    m_msg = re.search(r'\[msg "([^"]+)"\]', line)
+                    if m_msg:
+                        msg_desc = m_msg.group(1)
+                    else:
+                        clean_msg = re.sub(r'\[.*?\]', '', line).replace("Message:", "").strip()
+                        if clean_msg:
+                            msg_desc = clean_msg[:70]
+                    tx_messages.append((rule_id, severity, msg_desc))
 
         if tx_ip or tx_host or tx_method or tx_status or tx_messages:
             flush_transaction()
@@ -450,12 +459,13 @@ def print_and_format_report(matches, target_domain, logfile, total_tx_parsed, ti
             endpoint_rules[m["endpoint"]].add(m["rule_id"])
         endpoint_seen.add(m["endpoint"])
 
-    out(f"{'Endpoint':<35} {'Bot':<15} {'IP':<16} {'Detección':<12} {'Rule ID':<10} {'Severity':<10} {'Status':<8} {'Veces':<6}")
-    out("-" * 116)
+    out(f"{'Endpoint':<45} {'Bot':<15} {'IP':<16} {'Detección':<12} {'Rule ID':<10} {'Severity':<10} {'Status':<8} {'Veces':<6}")
+    out("-" * 126)
 
     sorted_combos = sorted(combo_counts.items(), key=lambda x: (x[0][0], x[0][1], x[0][2]))
     for (ep, bot, ip, det, rid, sev, stat), cnt in sorted_combos:
-        out(f"{ep:<35} {bot:<15} {ip:<16} {det:<12} {rid:<10} {sev:<10} {stat:<8} {cnt:<6}")
+        ep_disp = ep if len(ep) <= 45 else ep[:42] + "..."
+        out(f"{ep_disp:<45} {bot:<15} {ip:<16} {det:<12} {rid:<10} {sev:<10} {stat:<8} {cnt:<6}")
 
     out("")
 
@@ -474,14 +484,20 @@ def print_and_format_report(matches, target_domain, logfile, total_tx_parsed, ti
     out("")
 
     rule_counts = defaultdict(int)
+    rule_descs = {}
     for m in matches:
-        rule_counts[m["rule_id"]] += 1
+        r_id = m["rule_id"]
+        rule_counts[r_id] += 1
+        r_msg = m.get("rule_msg", "-")
+        if r_id not in rule_descs or (rule_descs[r_id] == "-" and r_msg != "-"):
+            rule_descs[r_id] = r_msg
 
     out("Total por Regla ModSecurity:")
-    out(f"{'Rule ID':<15} {'Veces':<8}")
-    out("-" * 25)
+    out(f"{'Rule ID':<12} {'Veces':<8} {'Descripción de la Regla'}")
+    out("-" * 80)
     for r_id, r_cnt in sorted(rule_counts.items(), key=lambda x: x[1], reverse=True):
-        out(f"{r_id:<15} {r_cnt:<8}")
+        r_msg = rule_descs.get(r_id, "-")
+        out(f"{r_id:<12} {r_cnt:<8} {r_msg}")
 
     out("")
 
@@ -547,7 +563,7 @@ def main():
     parser.add_argument("--all", action="store_true", help="Analizar todos los dominios presentes en el log de ModSecurity")
     parser.add_argument("--bot", help="Filtrar por un bot específico (ej: Anthropic, GPTBot, Googlebot)")
     parser.add_argument("--logfile", default=DEFAULT_LOGFILE, help=f"Ruta al archivo de log de ModSecurity (defecto: {DEFAULT_LOGFILE})")
-    parser.add_argument("--no-export", action="store_true", help="No exportar el resultado a archivo TXT en /var/www/html")
+    parser.add_argument("--export", action="store_true", help="Exportar el resultado a un archivo TXT en /var/www/html (desactivado por defecto)")
 
     args = parser.parse_args()
 
@@ -572,7 +588,7 @@ def main():
 
     report_text = print_and_format_report(matches, target_domain, args.logfile, total_tx_parsed, ticket=args.ticket)
 
-    if matches and not args.no_export:
+    if matches and args.export:
         filepath, url = export_txt(report_text)
         if filepath:
             print("-" * 60)
