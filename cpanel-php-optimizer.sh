@@ -274,11 +274,10 @@ with open(domains_file) as f:
         if len(parts) < 9:
             continue
         domain = parts[0]
-        fpm = int(parts[3])
         suspended = int(parts[5])
 
-        # Solo generar URLs de prueba para dominios sin PHP-FPM activo (para baseline pre-migración)
-        if fpm == 1 or suspended == 1:
+        # Omitir dominios suspendidos
+        if suspended == 1:
             continue
 
         logfiles = []
@@ -334,7 +333,7 @@ log "URLs de prueba guardadas en $URLS_FILE"
 # ETAPA 4: BASELINE HTTP PRE-MIGRACIÓN
 # ============================================================
 
-stage "4" "18" "Obteniendo Baseline HTTP pre-migración..."
+stage "4" "18" "Obteniendo Diagnóstico HTTP de dominios (secuencial, 1 a la vez)..."
 
 printf "domain\tpath\tfull_url\thttp_code\teffective_url\tredirect_count\tttfb_s\ttotal_time_s\ttimestamp\tcurl_result\n" > "$HTTP_BEFORE_FILE"
 
@@ -348,7 +347,7 @@ run_http_test() {
 
     curl -kLsS \
         --connect-timeout 5 \
-        --max-time 20 \
+        --max-time 15 \
         -o /dev/null \
         -w "%{http_code}\t%{url_effective}\t%{num_redirects}\t%{time_starttransfer}\t%{time_total}\n" \
         "$full_url" </dev/null 2>/dev/null > "$tmp" || echo -e "000\t${full_url}\t0\t0.000\t0.000" > "$tmp"
@@ -366,18 +365,18 @@ run_http_test() {
         "$domain" "$url_path" "$full_url" "$code" "$eff_url" "$redirects" "$ttfb" "$total" "$(date '+%F %T')" "$result_str" >> "$outfile"
 }
 
-# Ejecutar baseline pre-migración únicamente para dominios sin PHP-FPM activo
+# Ejecutar diagnóstico HTTP dominio por dominio (secuencial para no elevar carga)
 if [ -s "$URLS_FILE" ]; then
     while IFS=$'\t' read -r DOMAIN URL_PATH; do
         [ -n "$DOMAIN" ] || continue
         run_http_test "$DOMAIN" "$URL_PATH" "$HTTP_BEFORE_FILE"
     done < "$URLS_FILE"
 
-    echo "Baseline HTTP pre-migración completado."
-    log "Baseline pre-migración guardado en $HTTP_BEFORE_FILE"
+    echo "Diagnóstico HTTP de dominios completado."
+    log "Diagnóstico HTTP guardado en $HTTP_BEFORE_FILE"
 else
-    echo "Todos los dominios ya cuentan con PHP-FPM activo. Omitiendo baseline HTTP pre-migración."
-    log "No hay dominios sin PHP-FPM activo para baseline pre-migración."
+    echo "No se encontraron dominios activos para el diagnóstico HTTP."
+    log "No hay dominios activos en $URLS_FILE."
 fi
 
 # ============================================================
@@ -737,24 +736,13 @@ hr
 echo
 
 # ============================================================
-# ETAPA 11: WARM-UP CONTROLADO DE POOLS PHP-FPM
+# ETAPA 11: ESTABILIZACIÓN DE PROCESOS PHP-FPM
 # ============================================================
 
-stage "11" "18" "Warm-up de pools PHP-FPM para medición de memoria en vivo..."
+stage "11" "18" "Estabilización de procesos PHP-FPM para medición de RAM..."
 
-# Peticiones livianas en paralelo controlado (máx 4 simultáneas) para despertar 1 worker por pool en ondemand sin elevar carga
-awk -F'\t' '$4=="1" && $6=="0" {print "https://" $1 "/"}' "$DOMAINS_FILE" | \
-    xargs -n 1 -P 4 -I {} curl -kLsS --connect-timeout 1 --max-time 2 "{}" -o /dev/null 2>/dev/null || true
-
-# Warm-up adicional para dominios recién migrados si existen en urls.tsv
-if [ -s "$URLS_FILE" ]; then
-    while IFS=$'\t' read -r DOMAIN URL_PATH; do
-        [ -n "$DOMAIN" ] || continue
-        curl -kLsS --connect-timeout 1 --max-time 2 "https://${DOMAIN}${URL_PATH}" </dev/null >/dev/null 2>&1 || true
-    done < "$URLS_FILE"
-fi
-
-sleep 1
+# Pausa breve para estabilizar procesos PHP-FPM activos tras el diagnóstico HTTP
+sleep 2
 
 
 # ============================================================
