@@ -274,6 +274,12 @@ with open(domains_file) as f:
         if len(parts) < 9:
             continue
         domain = parts[0]
+        fpm = int(parts[3])
+        suspended = int(parts[5])
+
+        # Solo generar URLs de prueba para dominios sin PHP-FPM activo (para baseline pre-migración)
+        if fpm == 1 or suspended == 1:
+            continue
 
         logfiles = []
         for base in ["/etc/apache2/logs/domlogs", "/usr/local/apache/domlogs", "/var/log/apache2/domlogs", "/var/log/nginx/domains"]:
@@ -360,14 +366,19 @@ run_http_test() {
         "$domain" "$url_path" "$full_url" "$code" "$eff_url" "$redirects" "$ttfb" "$total" "$(date '+%F %T')" "$result_str" >> "$outfile"
 }
 
-# Ejecutar baseline pre-migración para todos los dominios activos
-while IFS=$'\t' read -r DOMAIN URL_PATH; do
-    [ -n "$DOMAIN" ] || continue
-    run_http_test "$DOMAIN" "$URL_PATH" "$HTTP_BEFORE_FILE"
-done < "$URLS_FILE"
+# Ejecutar baseline pre-migración únicamente para dominios sin PHP-FPM activo
+if [ -s "$URLS_FILE" ]; then
+    while IFS=$'\t' read -r DOMAIN URL_PATH; do
+        [ -n "$DOMAIN" ] || continue
+        run_http_test "$DOMAIN" "$URL_PATH" "$HTTP_BEFORE_FILE"
+    done < "$URLS_FILE"
 
-echo "Baseline HTTP pre-migración completado."
-log "Baseline pre-migración guardado en $HTTP_BEFORE_FILE"
+    echo "Baseline HTTP pre-migración completado."
+    log "Baseline pre-migración guardado en $HTTP_BEFORE_FILE"
+else
+    echo "Todos los dominios ya cuentan con PHP-FPM activo. Omitiendo baseline HTTP pre-migración."
+    log "No hay dominios sin PHP-FPM activo para baseline pre-migración."
+fi
 
 # ============================================================
 # ETAPA 5: EVALUACIÓN DE MIGRACIÓN A PHP-FPM
@@ -1050,6 +1061,7 @@ measured_mems = [num(r, "p90_mb") or num(r, "avg_mb") for r in rows if num(r, "w
 server_median_mem = sorted(measured_mems)[len(measured_mems)//2] if measured_mems else 64.0
 server_median_mem = max(48.0, min(128.0, server_median_mem))
 
+# PASO 1: Calcular mem_ref y demanda raw por pool
 for r in rows:
     workers = num(r, "workers")
     avg_mem = num(r, "avg_mb")
@@ -1088,6 +1100,12 @@ for r in rows:
         raw_rec = min(raw_rec, 4)
 
     raw_rec = max(i("IDLE_MIN_CHILDREN") if dynamic == 0 else i("ACTIVE_MIN_CHILDREN"), raw_rec)
+
+    # Límite individual por pool: Un pool no debe acaparar > 50% del presupuesto PHP salvo si es único
+    if len(rows) > 1:
+        single_pool_max = max(2, int((php_budget * 0.50) / mem_ref))
+        raw_rec = min(raw_rec, single_pool_max)
+
     raw_rec = min(i("MAX_CHILDREN_HARD"), raw_rec)
 
     r["_mem_ref"] = mem_ref
@@ -1095,6 +1113,91 @@ for r in rows:
     r["_demand"] = demand
     r["_concurrency"] = max(concurrency_peak, concurrency_avg)
 
+# PASO 2: Calcular final_children tentativo por pool con guardrails individuales
+for r in rows:
+    cur_ch = int(num(r, "current_children"))
+    raw_rec = r["_raw_rec"]
+    pool_type = r.get("pool_type", "EXISTING_FPM")
+    mem_source = r.get("mem_source", "ESTIMATED")
+    confidence = r.get("confidence", "LOW")
+    traffic_data = r.get("traffic_data", "LOG_NOT_FOUND")
+    hits = int(num(r, "hits_max_children"))
+
+    reasons = []
+
+    # REGLA 1 & 11: Protección estricta ante falta de datos
+    if pool_type == "EXISTING_FPM" and (confidence in ("LOW", "PROVISIONAL") or traffic_data != "MEASURED_TRAFFIC" or mem_source == "ESTIMATED"):
+        final_rec = cur_ch
+        guardrail_rec = cur_ch
+        eligibility = "INSUFFICIENT_DATA"
+        reasons.append("Datos de tráfico/memoria no medidos estadísticamente; preserva configuración actual")
+    else:
+        min_allowed = 2 if (traffic_data == "MEASURED_TRAFFIC" or hits > 0 or r["_concurrency"] > 0.5) else 1
+
+        if raw_rec == 1 and not (confidence in ("HIGH", "MEDIUM") and traffic_data == "MEASURED_ZERO" and hits == 0 and cur_ch <= 3):
+            raw_rec = max(2, raw_rec)
+
+        raw_rec = max(min_allowed, raw_rec)
+
+        # Regla de Reducción Progresiva (max 50% por ejecución)
+        if raw_rec < cur_ch:
+            max_reduction = max(1, int(cur_ch * max_reduction_ratio))
+            guardrail_rec = max(cur_ch - max_reduction, raw_rec)
+        else:
+            guardrail_rec = raw_rec
+
+        final_rec = guardrail_rec
+
+        if final_rec == cur_ch:
+            eligibility = "NO_CHANGE"
+            reasons.append("Configuración actual adecuada")
+        elif pool_type == "NEW_FPM_POOL":
+            eligibility = "SAFE_TO_APPLY"
+            reasons.append("Configuración inicial provisional conservadora para nuevo pool")
+        elif confidence in ("HIGH", "MEDIUM") and traffic_data == "MEASURED_TRAFFIC":
+            eligibility = "SAFE_TO_APPLY"
+            reasons.append("Ajuste basado en demanda/memoria real observada")
+        else:
+            eligibility = "REVIEW_RECOMMENDED"
+            reasons.append("Ajuste recomendado para revisión manual")
+
+    if hits > 0:
+        reasons.append("alcanzó max_children (%d veces)" % hits)
+    if num(r, "peak_dyn_rpm") > 0:
+        reasons.append("pico %.0f dyn/min" % num(r, "peak_dyn_rpm"))
+    if num(r, "avg_total_s") >= 2:
+        reasons.append("HTTP lento %.2fs" % num(r, "avg_total_s"))
+
+    r["_final_rec"] = final_rec
+    r["_guardrail_rec"] = guardrail_rec
+    r["_eligibility"] = eligibility
+    r["_reasons"] = reasons
+
+# PASO 3: GARANTÍA GLOBAL DE CAPACIDAD VPS (Ajuste por presupuesto RAM y núcleos CPU)
+total_est_ram = sum(r["_final_rec"] * r["_mem_ref"] for r in rows)
+max_cpu_children = max(8, int(cpu * 16))
+total_children = sum(r["_final_rec"] for r in rows)
+
+if total_est_ram > php_budget or total_children > max_cpu_children:
+    ram_ratio = php_budget / total_est_ram if total_est_ram > 0 else 1.0
+    cpu_ratio = max_cpu_children / total_children if total_children > 0 else 1.0
+    scale_factor = min(ram_ratio, cpu_ratio)
+
+    for r in rows:
+        if r["_eligibility"] in ("SAFE_TO_APPLY", "REVIEW_RECOMMENDED"):
+            cur_ch = int(num(r, "current_children"))
+            floor_ch = i("ACTIVE_MIN_CHILDREN") if r.get("traffic_data") == "MEASURED_TRAFFIC" else i("IDLE_MIN_CHILDREN")
+            scaled_ch = max(floor_ch, int(math.floor(r["_final_rec"] * scale_factor)))
+            if scaled_ch < r["_final_rec"]:
+                r["_final_rec"] = scaled_ch
+                if ram_ratio < cpu_ratio:
+                    r["_reasons"].append("Ajustado por límite de RAM VPS (budget %.0f MB)" % php_budget)
+                else:
+                    r["_reasons"].append("Ajustado por límite de CPU VPS (%d cores max %d children)" % (int(cpu), max_cpu_children))
+                if r["_final_rec"] == cur_ch:
+                    r["_eligibility"] = "NO_CHANGE"
+
+# PASO 4: Reciclaje pm.max_requests y escritura final
 out_fields = [
     "domain", "phpver", "yaml", "pool_type", "confidence", "mem_source", "traffic_data",
     "current_children", "raw_recommendation", "guardrail_recommendation", "final_children",
@@ -1107,70 +1210,18 @@ with open(out_path, "w", newline="") as f:
     w = csv.DictWriter(f, out_fields, delimiter="\t", lineterminator="\n")
     w.writeheader()
 
-    for idx, r in enumerate(rows):
+    for r in rows:
         cur_ch = int(num(r, "current_children"))
-        raw_rec = r["_raw_rec"]
-        pool_type = r.get("pool_type", "EXISTING_FPM")
-        mem_source = r.get("mem_source", "ESTIMATED")
-        confidence = r.get("confidence", "LOW")
-        traffic_data = r.get("traffic_data", "LOG_NOT_FOUND")
-        hits = int(num(r, "hits_max_children"))
-
-        reasons = []
-
-        # REGLA 1 & 11: Protección estricta ante falta de datos
-        if pool_type == "EXISTING_FPM" and (confidence in ("LOW", "PROVISIONAL") or traffic_data != "MEASURED_TRAFFIC" or mem_source == "ESTIMATED"):
-            final_rec = cur_ch
-            guardrail_rec = cur_ch
-            eligibility = "INSUFFICIENT_DATA"
-            reasons.append("Datos de tráfico/memoria no medidos estadísticamente; preserva configuración actual")
-        else:
-            # Regla de piso y guardrail de reducción
-            min_allowed = 2 if (traffic_data == "MEASURED_TRAFFIC" or hits > 0 or r["_concurrency"] > 0.5) else 1
-
-            if raw_rec == 1 and not (confidence in ("HIGH", "MEDIUM") and traffic_data == "MEASURED_ZERO" and hits == 0 and cur_ch <= 3):
-                raw_rec = max(2, raw_rec)
-
-            raw_rec = max(min_allowed, raw_rec)
-
-            # Regla 6: Guardrail de Reducción Progresiva (max 50% por ejecución)
-            if raw_rec < cur_ch:
-                max_reduction = max(1, int(cur_ch * max_reduction_ratio))
-                guardrail_rec = max(cur_ch - max_reduction, raw_rec)
-            else:
-                guardrail_rec = raw_rec
-
-            final_rec = guardrail_rec
-
-            if final_rec == cur_ch:
-                eligibility = "NO_CHANGE"
-                reasons.append("Configuración actual adecuada")
-            elif pool_type == "NEW_FPM_POOL":
-                eligibility = "SAFE_TO_APPLY"
-                reasons.append("Configuración inicial provisional conservadora para nuevo pool")
-            elif confidence in ("HIGH", "MEDIUM") and traffic_data == "MEASURED_TRAFFIC":
-                eligibility = "SAFE_TO_APPLY"
-                reasons.append("Ajuste basado en demanda/memoria real observada")
-            else:
-                eligibility = "REVIEW_RECOMMENDED"
-                reasons.append("Ajuste recomendado para revisión manual")
-
-        if hits > 0:
-            reasons.append("alcanzó max_children (%d veces)" % hits)
-        if num(r, "peak_dyn_rpm") > 0:
-            reasons.append("pico %.0f dyn/min" % num(r, "peak_dyn_rpm"))
-        if num(r, "avg_total_s") >= 2:
-            reasons.append("HTTP lento %.2fs" % num(r, "avg_total_s"))
-
-        # Reciclaje pm.max_requests
+        final_rec = r["_final_rec"]
         mem = r["_mem_ref"]
         avg = num(r, "avg_mb")
         maxm = num(r, "max_mb")
         variability = (maxm / avg) if avg > 0 else 1.0
+        confidence = r.get("confidence", "LOW")
 
         if confidence == "PROVISIONAL" or num(r, "workers") == 0:
             maxreq = 250
-        elif mem >= 256 or variability >= 3.0:
+        elif mem >= 256 or variability >= 3.0 or pressure < 0.90:
             maxreq = 100
         elif mem >= 192 or variability >= 2.3:
             maxreq = 150
@@ -1185,13 +1236,13 @@ with open(out_path, "w", newline="") as f:
             "domain": r["domain"],
             "phpver": r["phpver"],
             "yaml": r["yaml"],
-            "pool_type": pool_type,
+            "pool_type": r.get("pool_type", "EXISTING_FPM"),
             "confidence": confidence,
-            "mem_source": mem_source,
-            "traffic_data": traffic_data,
+            "mem_source": r.get("mem_source", "ESTIMATED"),
+            "traffic_data": r.get("traffic_data", "LOG_NOT_FOUND"),
             "current_children": cur_ch,
-            "raw_recommendation": raw_rec,
-            "guardrail_recommendation": guardrail_rec,
+            "raw_recommendation": r["_raw_rec"],
+            "guardrail_recommendation": r["_guardrail_rec"],
             "final_children": final_rec,
             "current_requests": int(num(r, "current_requests")),
             "recommended_requests": maxreq,
@@ -1199,10 +1250,10 @@ with open(out_path, "w", newline="") as f:
             "mem_ref_mb": "%.1f" % mem,
             "peak_dyn_rpm": "%.1f" % num(r, "peak_dyn_rpm"),
             "avg_total_s": "%.3f" % num(r, "avg_total_s"),
-            "hits_max_children": hits,
+            "hits_max_children": int(num(r, "hits_max_children")),
             "estimated_pool_max_mb": "%.1f" % (final_rec * mem),
-            "tuning_eligibility": eligibility,
-            "reason": "; ".join(reasons)
+            "tuning_eligibility": r["_eligibility"],
+            "reason": "; ".join(r["_reasons"])
         })
 ' "$SYSTEM_ENV" "$MERGED_FILE" "$RECS_FILE" </dev/null
 
@@ -1211,6 +1262,16 @@ with open(out_path, "w", newline="") as f:
 # ============================================================
 
 stage "14" "18" "RECOMENDACIONES DE OPTIMIZACIÓN DE POOLS"
+
+TOTAL_EST_RAM=$(awk -F'\t' 'NR>1 {s+=$19} END {printf "%.0f", s}' "$RECS_FILE" 2>/dev/null || echo 0)
+TOTAL_FINAL_CHILDREN=$(awk -F'\t' 'NR>1 {s+=$11} END {print s+0}' "$RECS_FILE" 2>/dev/null || echo 0)
+
+echo " CAPACIDAD Y PRESUPUESTO GLOBAL DEL VPS:"
+echo "   - Cores CPU Servidor         : ${CPU}"
+echo "   - Presupuesto RAM PHP-FPM    : ${TOTAL_MB} MB Total | Presupuesto max PHP: $(python3 -c 'import sys; env={k:float(v) for line in open(sys.argv[1]) if "=" in line for k,v in [line.strip().split("=",1)]}; headroom=max(env["HEADROOM_MIN_MB"], env["TOTAL_MB"]*env["HEADROOM_PCT"]/100.0); cap_pct=env["TOTAL_MB"]*env["PHP_BUDGET_MAX_PCT"]/100.0; cap_live=env["AVAIL_MB"]+env["PHP_RSS_MB"]-headroom; print(int(max(256.0, min(cap_pct, cap_live))))' "$SYSTEM_ENV" 2>/dev/null || echo "$TOTAL_MB") MB"
+echo "   - Compromiso Teórico RAM     : ${TOTAL_EST_RAM} MB (Suma de max_children * MB/worker de todos los pools)"
+echo "   - Workers Totales Config     : ${TOTAL_FINAL_CHILDREN} max_children globales combinados"
+echo
 
 RECS_TABLE="$WORKDIR/recs_table.tsv"
 printf "DOMINIO\tTIPO POOL\tCONFIANZA\tTRÁFICO\tELEGIBILIDAD\tCUR_CH\tREC_CH\tCUR_RQ\tREC_RQ\tWORKERS\tMEM_MB\tHITS\n" > "$RECS_TABLE"
