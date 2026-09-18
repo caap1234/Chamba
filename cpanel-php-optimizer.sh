@@ -737,17 +737,25 @@ hr
 echo
 
 # ============================================================
-# ETAPA 11: WARM-UP INICIAL DE POOLS RECIÉN MIGRADOS
+# ETAPA 11: WARM-UP CONTROLADO DE POOLS PHP-FPM
 # ============================================================
 
-stage "11" "18" "Warm-up inicial y primera muestra para pools recién creados..."
+stage "11" "18" "Warm-up de pools PHP-FPM para medición de memoria en vivo..."
 
-# Enviar solicitudes GET livianas a dominios recién migrados
-while IFS=$'\t' read -r DOMAIN URL_PATH; do
-    curl -kLsS --connect-timeout 2 --max-time 3 "https://${DOMAIN}${URL_PATH}" </dev/null >/dev/null 2>&1 || true
-done < "$URLS_FILE"
+# Peticiones livianas en paralelo controlado (máx 4 simultáneas) para despertar 1 worker por pool en ondemand sin elevar carga
+awk -F'\t' '$4=="1" && $6=="0" {print "https://" $1 "/"}' "$DOMAINS_FILE" | \
+    xargs -n 1 -P 4 -I {} curl -kLsS --connect-timeout 1 --max-time 2 "{}" -o /dev/null 2>/dev/null || true
+
+# Warm-up adicional para dominios recién migrados si existen en urls.tsv
+if [ -s "$URLS_FILE" ]; then
+    while IFS=$'\t' read -r DOMAIN URL_PATH; do
+        [ -n "$DOMAIN" ] || continue
+        curl -kLsS --connect-timeout 1 --max-time 2 "https://${DOMAIN}${URL_PATH}" </dev/null >/dev/null 2>&1 || true
+    done < "$URLS_FILE"
+fi
 
 sleep 1
+
 
 # ============================================================
 # ETAPA 12: ANÁLISIS DE POOLS Y CLASIFICACIÓN DE CONFIANZA
