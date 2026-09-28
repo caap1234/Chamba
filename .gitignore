@@ -1,0 +1,4 @@
+Tarea/
+__pycache__/
+venv/
+*.pyc
