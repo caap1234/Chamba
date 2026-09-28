@@ -100,13 +100,7 @@ function host_matches(value, normalized, suffix) {
 
   suffix="." target_domain
 
-  if (
-    length(normalized) > length(suffix) &&
-    substr(
-      normalized,
-      length(normalized) - length(suffix) + 1
-    ) == suffix
-  ) {
+  if (length(normalized) > length(suffix) && substr(normalized, length(normalized) - length(suffix) + 1) == suffix) {
     return 1
   }
 
@@ -190,13 +184,7 @@ BEGIN {
 }
 
 /^--[^-]+-A--$/ {
-  if (
-    remote_ip != "" ||
-    host != "" ||
-    method != "" ||
-    status != "" ||
-    msg_count > 0
-  ) {
+  if (remote_ip != "" || host != "" || method != "" || status != "" || msg_count > 0) {
     flush_tx()
   }
 
@@ -253,11 +241,7 @@ inB && method == "" {
 
   n=split(request_line,a,/[[:space:]]+/)
 
-  if (
-    n >= 3 &&
-    a[1] ~ /^[A-Z]+$/ &&
-    a[n] ~ /^HTTP\/[0-9.]+$/
-  ) {
+  if (n >= 3 && a[1] ~ /^[A-Z]+$/ && a[n] ~ /^HTTP\/[0-9.]+$/) {
     method=a[1]
     uri=a[2]
     endpoint=uri
@@ -289,11 +273,7 @@ inF && status == "" {
 
   n=split(response_line,a,/[[:space:]]+/)
 
-  if (
-    n >= 2 &&
-    a[1] ~ /^HTTP\/[0-9.]+$/ &&
-    a[2] ~ /^[0-9][0-9][0-9]$/
-  ) {
+  if (n >= 2 && a[1] ~ /^HTTP\/[0-9.]+$/ && a[2] ~ /^[0-9][0-9][0-9]$/) {
     status=a[2]
   }
 
@@ -337,13 +317,7 @@ END {
   #
   # Procesa una transacción incompleta.
   #
-  if (
-    remote_ip != "" ||
-    host != "" ||
-    method != "" ||
-    status != "" ||
-    msg_count > 0
-  ) {
+  if (remote_ip != "" || host != "" || method != "" || status != "" || msg_count > 0) {
     flush_tx()
   }
 
@@ -430,16 +404,9 @@ END {
 
       if (host_arr[i] > host_arr[j]) {
         swap=1
-      } else if (
-        host_arr[i] == host_arr[j] &&
-        endpoint_arr[i] > endpoint_arr[j]
-      ) {
+      } else if (host_arr[i] == host_arr[j] && endpoint_arr[i] > endpoint_arr[j]) {
         swap=1
-      } else if (
-        host_arr[i] == host_arr[j] &&
-        endpoint_arr[i] == endpoint_arr[j] &&
-        rule_arr[i] > rule_arr[j]
-      ) {
+      } else if (host_arr[i] == host_arr[j] && endpoint_arr[i] == endpoint_arr[j] && rule_arr[i] > rule_arr[j]) {
         swap=1
       }
 
@@ -567,11 +534,7 @@ END {
     for (k in endpoint_rule) {
       split(k,p,SUBSEP)
 
-      if (
-        p[1] == real_host &&
-        p[2] == ep &&
-        p[3] != "-"
-      ) {
+      if (p[1] == real_host && p[2] == ep && p[3] != "-") {
         c++
         list[c]=p[3]
       }
