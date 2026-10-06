@@ -565,14 +565,20 @@ if [[ "$ENABLE_MIGRATION" == "1" ]]; then
         RESULT="$(whmapi1 --output=json php_set_vhost_versions version="$VERSION" vhost="$DOM_CLEAN" php_fpm=1 </dev/null 2>&1)"
         echo "$RESULT" >> "$LOG_FILE"
 
-        API_STATUS="$(printf '%s' "$RESULT" | python3 -c '
+        API_OUT="$(printf '%s' "$RESULT" | python3 -c '
 import json, sys
 try:
     x = json.load(sys.stdin)
-    print(x.get("metadata", {}).get("result", 0))
-except Exception:
-    print(0)
+    meta = x.get("metadata", {})
+    res = meta.get("result", 0)
+    reason = meta.get("reason", "Error desconocido en WHM API").strip()
+    print(f"{res}|{reason}")
+except Exception as e:
+    print(f"0|Error JSON: {e}")
 ')"
+
+        API_STATUS="${API_OUT%%|*}"
+        API_REASON="${API_OUT#*|}"
 
         if [[ "$API_STATUS" == "1" ]]; then
             echo -e "  Estado: ${GREEN}[OK] PHP-FPM activado correctamente.${RESET}"
@@ -580,8 +586,8 @@ except Exception:
             echo "whmapi1 php_set_vhost_versions version=\"$VERSION\" vhost=\"$DOM_CLEAN\" php_fpm=0" >> "$ROLLBACK_MIG_SCRIPT"
             ((MIGRATED_DOMAINS_COUNT++))
         else
-            echo -e "  Estado: ${RED}ERROR API WHM${RESET}"
-            log "$DOM_CLEAN | FAILED API"
+            echo -e "  Estado: ${RED}ERROR API WHM:${RESET} ${API_REASON}"
+            log "$DOM_CLEAN | FAILED API | Reason: $API_REASON"
         fi
     done < "$MIGRATION_CANDIDATES"
 
