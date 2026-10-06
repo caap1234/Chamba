@@ -75,21 +75,38 @@ FALLBACK_DESCRIPTIONS = {
     "CPANEL_LOTS_OF_EMPTY_LINE": "El correo contiene una cantidad excesiva de líneas vacías consecutivas",
     "DC_PNG_UNO_LARGO": "Imagen PNG adjunta o incrustada con proporciones largas/sospechosas",
     "HTML_MESSAGE": "El correo incluye cuerpo en formato HTML",
-    "KAM_DMARC_NONE": "La política DMARC del dominio remitente está configurada en 'p=none'",
-    "KAM_DMARC_STATUS": "Estado o resultado de verificación de firma/registro DMARC",
+    "KAM_DMARC_NONE": "La política DMARC del dominio remitente está en 'p=none' o sin protección estricta",
+    "KAM_DMARC_STATUS": "Estado o prueba de fallo en verificación DKIM / SPF / DMARC",
     "KAM_INFOUSMEBIZ": "Uso de dominios con TLDs comunes en spam (.info, .us, .me, .biz)",
     "KAM_MAILBOX2": "Filtro KAM: Patrón coincidente con correo/buzón spammed o lista negra",
     "KAM_SHORT": "Cuerpo de correo extremadamente corto o contiene acortadores de URL",
     "PDS_BAD_THREAD_QP_64": "Encabezados con codificación Quoted-Printable (QP) sospechosa",
     "T_FILL_THIS_FORM_SHORT": "Patrón de formulario corto o solicitud de datos dentro del correo",
-    "URIBL_BLOCKED": "La consulta a las listas URIBL fue bloqueada (límite de peticiones de la IP del servidor alcanzado)",
+    "URIBL_BLOCKED": "La consulta a las listas URIBL fue bloqueada (límite de peticiones del servidor)",
     "BAYES_00": "Filtro Bayesiano indica 0% a 1% de probabilidad de spam (Reduce score)",
     "BAYES_50": "Filtro Bayesiano indica 40% a 60% de probabilidad de spam",
     "BAYES_99": "Filtro Bayesiano indica 99% a 100% de probabilidad de spam",
     "SPF_PASS": "Verificación SPF exitosa (Sender Policy Framework)",
     "SPF_FAIL": "Fallo en verificación SPF del remitente",
     "DKIM_SIGNED": "El mensaje contiene una firma digital DKIM",
-    "DKIM_VALID": "La firma digital DKIM es válida y coincide con el dominio"
+    "DKIM_VALID": "La firma digital DKIM es válida y coincide con el dominio",
+    "MALW_ATTACH": "Nombre de archivo adjunto sospechoso con probabilidad de contener malware",
+    "RCVD_IN_PBL": "Recibido desde una IP/relay listada en la lista Spamhaus PBL",
+    "RCVD_IN_SBL_CSS": "Recibido desde una IP/relay listada en la lista Spamhaus SBL-CSS",
+    "SPOOFED_FREEMAIL_NO_RDNS": "Remitente de correo gratuito sospechoso sin reverso DNS (rDNS)",
+    "SPOOFED_FREEMAIL": "Remitente suplantado haciendo uso de dominio de correo gratuito",
+    "RDNS_NONE": "Entregado a la red por un host sin reverso DNS (rDNS) configurado",
+    "SPF_HELO_SOFTFAIL": "El saludo HELO/EHLO no coincide con el registro SPF del dominio (softfail)",
+    "SPF_SOFTFAIL": "La IP de envío no está explícitamente autorizada en el SPF (softfail)",
+    "SUBJ_ALL_CAPS": "El asunto del correo está escrito totalmente en letras Mayúsculas",
+    "RCVD_IN_XBL": "Recibido desde una IP listada en Spamhaus XBL (Exploits Blocklist)",
+    "RCVD_IN_SBL": "Recibido desde una IP listada en Spamhaus SBL (Spamhaus Block List)",
+    "MIME_HTML_ONLY": "El correo contiene únicamente formato HTML sin versión en texto plano",
+    "DKIM_ADSP_CUSTOM_MED": "Sin firma de autor válida según política ADSP",
+    "FREEMAIL_FROM": "Dirección remitente pertenece a proveedor gratuito frecuentemente abusado",
+    "RCVD_IN_DNSWL_BLOCKED": "Aviso: Consulta a DNSWL bloqueada por límite de peticiones del servidor",
+    "SPOOF_GMAIL_MID": "Aparenta ser de Gmail pero el Message-ID no cumple el patrón oficial",
+    "FORGED_GMAIL_RCVD": "Indica remitente @gmail.com pero los servidores de envío no son de Google"
 }
 
 
@@ -102,13 +119,7 @@ def open_log_file(filepath):
 
 def search_exim_log(exim_id, custom_exim_log=None):
     """
-    Busca el ID de Exim en los logs de Exim y extrae:
-    - timestamp (datetime str)
-    - remitente (sender)
-    - dominio del remitente
-    - IP/Host del cliente
-    - mensaje de rechazo
-    - score de spam extraído del rechazo
+    Busca el ID de Exim en los logs de Exim y extrae detalles.
     """
     log_files = []
     if custom_exim_log:
@@ -188,12 +199,6 @@ def search_exim_log(exim_id, custom_exim_log=None):
 def search_maillog(domain, sender=None, timestamp_dt=None, custom_mail_log=None):
     """
     Busca en maillog las líneas de spamd asociadas al dominio/remitente y la hora cercana.
-    Retorna:
-    - Message-ID (<...>)
-    - PID de spamd
-    - Reglas de SpamAssassin activadas (lista de nombres)
-    - Puntaje total asignado y puntaje requerido
-    - Metadata (scantime, size, autolearn)
     """
     log_files = []
     if custom_mail_log:
@@ -257,7 +262,6 @@ def search_maillog(domain, sender=None, timestamp_dt=None, custom_mail_log=None)
             if target_pid or found_mid:
                 for line in lines:
                     if "spamd:" in line:
-                        # Buscar línea 'identified spam (7.3/5.0)' para obtener score decimal exacto
                         m_ident = re_identified.search(line)
                         if m_ident and (target_pid and f"spamd[{target_pid}]" in line):
                             try:
@@ -309,7 +313,7 @@ def search_maillog(domain, sender=None, timestamp_dt=None, custom_mail_log=None)
 
 def load_spamassassin_rules(custom_sa_dirs=None):
     """
-    Carga las definiciones de reglas, puntajes y descripciones desde las carpetas de SpamAssassin.
+    Carga las definiciones de reglas, puntajes y descripciones desde SpamAssassin.
     """
     sa_dirs = custom_sa_dirs if custom_sa_dirs else DEFAULT_SA_DIRS
     cf_files = []
@@ -369,15 +373,24 @@ def load_spamassassin_rules(custom_sa_dirs=None):
 
 
 def format_visual_report(exim_data, sa_data, rule_db):
-    """Imprime el reporte visual con formato y colores en la consola."""
+    """Imprime el reporte visual con formato y colores adaptados."""
+    import shutil
+
+    # Obtener el ancho de la consola (mínimo 120 caracteres para mejor visibilidad de descripciones)
+    term_width = shutil.get_terminal_size((125, 24)).columns
+    term_width = max(term_width, 120)
+
+    box_width = min(term_width, 135)
+
     print()
-    print(f"{Colors.BOLD}{Colors.OKCYAN}╔══════════════════════════════════════════════════════════════════════════════╗{Colors.ENDC}")
-    print(f"{Colors.BOLD}{Colors.OKCYAN}║              ANALIZADOR DE BLOQUEOS SPAMASSASSIN EN EXIM                     ║{Colors.ENDC}")
-    print(f"{Colors.BOLD}{Colors.OKCYAN}╚══════════════════════════════════════════════════════════════════════════════╝{Colors.ENDC}")
+    print(f"{Colors.BOLD}{Colors.OKCYAN}╔{'═' * (box_width - 2)}╗{Colors.ENDC}")
+    title = "ANALIZADOR DE BLOQUEOS SPAMASSASSIN EN EXIM"
+    print(f"{Colors.BOLD}{Colors.OKCYAN}║{title.center(box_width - 2)}║{Colors.ENDC}")
+    print(f"{Colors.BOLD}{Colors.OKCYAN}╚{'═' * (box_width - 2)}╝{Colors.ENDC}")
     print()
 
     # --- Sección 1: Información del Correo ---
-    print(f"{Colors.BOLD}{Colors.HEADER}─── 1. DETALLES DEL CORREO RECHAZADO ──────────────────────────────────────────{Colors.ENDC}")
+    print(f"{Colors.BOLD}{Colors.HEADER}─── 1. DETALLES DEL CORREO RECHAZADO {'─' * (box_width - 38)}{Colors.ENDC}")
     print(f"  • {Colors.BOLD}Exim Message ID:{Colors.ENDC}  {Colors.WARNING}{exim_data['exim_id']}{Colors.ENDC}")
     print(f"  • {Colors.BOLD}Message-ID Header:{Colors.ENDC} {sa_data['mid'] or 'No encontrado en maillog'}")
     print(f"  • {Colors.BOLD}Fecha / Hora Exim:{Colors.ENDC} {exim_data['timestamp_str'] or 'Desconocida'}")
@@ -388,11 +401,10 @@ def format_visual_report(exim_data, sa_data, rule_db):
         print(f"  • {Colors.BOLD}Motivo en Exim:{Colors.ENDC}    {Colors.FAIL}{exim_data['rejection_msg']}{Colors.ENDC}")
     print()
 
-    # Usar score decimal si Exim lo tenía y maillog no o viceversa
     final_score = sa_data['score'] if sa_data['score'] is not None else exim_data['score_from_exim']
 
     # --- Sección 2: Resultado de SpamAssassin ---
-    print(f"{Colors.BOLD}{Colors.HEADER}─── 2. RESULTADO DE SPAMASSASSIN (spamd) ──────────────────────────────────────{Colors.ENDC}")
+    print(f"{Colors.BOLD}{Colors.HEADER}─── 2. RESULTADO DE SPAMASSASSIN (spamd) {'─' * (box_width - 42)}{Colors.ENDC}")
     
     score_str = f"{final_score:.1f}" if final_score is not None else "N/A"
     req_str = f"{sa_data['required_score']:.1f}" if sa_data['required_score'] is not None else "5.0"
@@ -409,7 +421,7 @@ def format_visual_report(exim_data, sa_data, rule_db):
     print()
 
     # --- Sección 3: Desglose de Reglas y Puntajes ---
-    print(f"{Colors.BOLD}{Colors.HEADER}─── 3. DESGLOSE DE REGLAS Y APORTACIÓN AL SCORE FINAL ─────────────────────────{Colors.ENDC}")
+    print(f"{Colors.BOLD}{Colors.HEADER}─── 3. DESGLOSE DE REGLAS Y APORTACIÓN AL SCORE FINAL {'─' * (box_width - 55)}{Colors.ENDC}")
     
     if not sa_data['rules']:
         print(f"  {Colors.WARNING}No se encontraron listas de reglas en maillog.{Colors.ENDC}")
@@ -423,12 +435,11 @@ def format_visual_report(exim_data, sa_data, rule_db):
         score = info.get("score", 0.0)
         desc = info.get("description")
         
-        # Si no hay descripción en .cf, buscar en diccionario de respaldo en español
-        if not desc or desc == "Sin descripción":
-            desc = FALLBACK_DESCRIPTIONS.get(rule_name, "Sin descripción en archivos de configuración")
+        if not desc or desc.startswith("Sin descripción"):
+            desc = FALLBACK_DESCRIPTIONS.get(rule_name, desc or "Sin descripción en archivos de configuración")
 
         if score == 0.0 and rule_name.startswith("T_"):
-            score = 0.01  # Test rule por defecto
+            score = 0.01
         
         if score > 0:
             total_positive_score += score
@@ -439,13 +450,14 @@ def format_visual_report(exim_data, sa_data, rule_db):
             "desc": desc
         })
 
-    # Ordenar reglas por puntaje descendente (más dañinas primero)
     analyzed_rules.sort(key=lambda x: x["score"], reverse=True)
 
+    # Definir anchos dinámicos de columnas para la tabla
     rule_col_w = 27
     score_col_w = 9
     bar_col_w = 14
-    desc_col_w = 42
+    # La columna de descripción ocupará todo el resto del espacio disponible en pantalla
+    desc_col_w = max(box_width - (rule_col_w + score_col_w + bar_col_w + 5), 65)
 
     print(f"┌{'─' * rule_col_w}┬{'─' * score_col_w}┬{'─' * bar_col_w}┬{'─' * desc_col_w}┐")
     print(f"│ {Colors.BOLD}{'REGLA DISPARADA':<{rule_col_w-1}}{Colors.ENDC}│ {Colors.BOLD}{'PUNTAJE':<{score_col_w-1}}{Colors.ENDC}│ {Colors.BOLD}{'IMPACTO':<{bar_col_w-1}}{Colors.ENDC}│ {Colors.BOLD}{'DESCRIPCIÓN DE LA REGLA':<{desc_col_w-1}}{Colors.ENDC}│")
@@ -484,7 +496,7 @@ def format_visual_report(exim_data, sa_data, rule_db):
     print()
 
     # --- Sección 4: Conclusión de Bloqueo ---
-    print(f"{Colors.BOLD}{Colors.HEADER}─── 4. CONCLUSIÓN Y REGLAS CLAVE DEL BLOQUEO ───────────────────────────────────{Colors.ENDC}")
+    print(f"{Colors.BOLD}{Colors.HEADER}─── 4. CONCLUSIÓN Y REGLAS CLAVE DEL BLOQUEO {'─' * (box_width - 46)}{Colors.ENDC}")
     top_rules = [r for r in analyzed_rules if r["score"] > 0]
     if top_rules:
         top_rule = top_rules[0]
@@ -519,10 +531,19 @@ def main():
         Colors.disable()
 
     exim_id = args.exim_id
+
+    # Si se ejecuta mediante pipe (wget | python3 -), sys.stdin no es una TTY.
+    # Para permitir lectura interactiva del ID, leemos directamente desde la consola /dev/tty.
     if not exim_id:
         try:
-            exim_id = input(f"{Colors.BOLD}Ingrese el Exim Message ID (ej: 1xE4Y8-000000027jC-3kxX): {Colors.ENDC}").strip()
-        except (KeyboardInterrupt, EOFError):
+            if not sys.stdin.isatty() and os.path.exists('/dev/tty'):
+                with open('/dev/tty', 'r') as tty:
+                    sys.stdout.write(f"{Colors.BOLD}Ingrese el Exim Message ID (ej: 1xE4Y8-000000027jC-3kxX): {Colors.ENDC}")
+                    sys.stdout.flush()
+                    exim_id = tty.readline().strip()
+            else:
+                exim_id = input(f"{Colors.BOLD}Ingrese el Exim Message ID (ej: 1xE4Y8-000000027jC-3kxX): {Colors.ENDC}").strip()
+        except (KeyboardInterrupt, EOFError, Exception):
             print("\nOperación cancelada.")
             sys.exit(0)
 
@@ -556,4 +577,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
