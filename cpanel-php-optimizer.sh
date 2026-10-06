@@ -86,6 +86,18 @@ else
     RESET=''
 fi
 
+HTTPD_STOPPED=0
+
+cleanup() {
+    if [[ "${HTTPD_STOPPED:-0}" == "1" ]]; then
+        echo -e "\n${YELLOW}Restaurando servicio Apache (httpd)...${RESET}"
+        log "Cleanup: Restaurando servicio httpd"
+        /usr/local/cpanel/scripts/restartsrv_httpd --start >/dev/null 2>&1 || systemctl start httpd >/dev/null 2>&1 || true
+        HTTPD_STOPPED=0
+    fi
+}
+trap cleanup EXIT INT TERM
+
 log() {
     echo "$(date '+%F %T') $*" >> "$LOG_FILE"
 }
@@ -499,9 +511,23 @@ if [[ "$ENABLE_MIGRATION" == "1" && "$NEEDS_PKG_COUNT" -gt 0 ]]; then
     prompt_user "¿Deseas instalar estos paquetes mediante EasyApache/YUM/DNF? [y/N]: " CONFIRM_PKG
     case "$CONFIRM_PKG" in
         y|Y|yes|YES)
-            echo "Instalando paquetes FPM faltantes..."
+            echo -e "${YELLOW}Deteniendo Apache (httpd) temporalmente para liberar CPU/RAM y reducir la carga del servidor durante la instalación...${RESET}"
+            log "Deteniendo httpd antes de yum install para evitar sobrecarga"
+            /usr/local/cpanel/scripts/restartsrv_httpd --stop >/dev/null 2>&1 || systemctl stop httpd >/dev/null 2>&1 || true
+            HTTPD_STOPPED=1
+
+            echo "Instalando paquetes FPM faltantes vía YUM/DNF..."
             log "Instalando paquetes: $MISSING_PKGS"
-            if yum install -y $MISSING_PKGS </dev/null >> "$LOG_FILE" 2>&1; then
+            
+            YUM_STATUS=0
+            yum install -y $MISSING_PKGS </dev/null >> "$LOG_FILE" 2>&1 || YUM_STATUS=$?
+
+            echo -e "${GREEN}Reiniciando servicio Apache (httpd)...${RESET}"
+            log "Reiniciando httpd tras finalizar la instalación de paquetes FPM"
+            /usr/local/cpanel/scripts/restartsrv_httpd --start >/dev/null 2>&1 || systemctl start httpd >/dev/null 2>&1 || true
+            HTTPD_STOPPED=0
+
+            if [[ $YUM_STATUS -eq 0 ]]; then
                 echo -e "${GREEN}Paquetes instalados correctamente.${RESET}"
                 INSTALLED_NEW_PKGS=1
                 # Actualizar candidates
