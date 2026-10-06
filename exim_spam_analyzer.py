@@ -199,6 +199,8 @@ def search_exim_log(exim_id, custom_exim_log=None):
 def search_maillog(domain, sender=None, timestamp_dt=None, custom_mail_log=None):
     """
     Busca en maillog las líneas de spamd asociadas al dominio/remitente y la hora cercana.
+    Vincular estrictamente por el Message-ID exacto (<...>) para evitar cruzar información
+    con otros correos procesados por el mismo PID de spamd.
     """
     log_files = []
     if custom_mail_log:
@@ -228,6 +230,7 @@ def search_maillog(domain, sender=None, timestamp_dt=None, custom_mail_log=None)
 
     re_checking = re.compile(r'spamd\[(?P<pid>\d+)\]:\s*spamd:\s*checking message\s*<(?P<mid>[^>]+)>\s*for\s*(?P<user>\S+)')
     re_identified = re.compile(r'spamd\[(?P<pid>\d+)\]:\s*spamd:\s*identified spam \((?P<score>[\d\.]+)\/(?P<req>[\d\.]+)\)')
+    re_clean_msg = re.compile(r'spamd\[(?P<pid>\d+)\]:\s*spamd:\s*clean message \((?P<score>[\d\.-]+)\/(?P<req>[\d\.]+)\)')
     re_result = re.compile(
         r'spamd\[(?P<pid>\d+)\]:\s*spamd:\s*result:\s*(?P<flag>[YN])\s+'
         r'(?P<score>[\d\.-]+)\s*-\s*(?P<rules>[A-Z0-9_,]+)\s+'
@@ -236,6 +239,7 @@ def search_maillog(domain, sender=None, timestamp_dt=None, custom_mail_log=None)
 
     found_mid = None
     target_pid = None
+    mid_raw_str = None
 
     for file_path in log_files:
         if not os.path.exists(file_path):
@@ -244,7 +248,8 @@ def search_maillog(domain, sender=None, timestamp_dt=None, custom_mail_log=None)
             with open_log_file(file_path) as f:
                 lines = f.readlines()
 
-            for line in lines:
+            checking_idx = -1
+            for idx, line in enumerate(lines):
                 if "spamd:" in line and "checking message" in line:
                     match_domain = (domain and domain.lower() in line.lower()) or (sender and sender.lower() in line.lower())
                     match_time = any(tp in line for tp in time_patterns) if time_patterns else True
@@ -252,56 +257,63 @@ def search_maillog(domain, sender=None, timestamp_dt=None, custom_mail_log=None)
                     if match_domain and match_time:
                         m = re_checking.search(line)
                         if m:
-                            found_mid = "<" + m.group("mid") + ">"
+                            mid_raw_str = m.group("mid")
+                            found_mid = "<" + mid_raw_str + ">"
                             target_pid = m.group("pid")
                             sa_info["mid"] = found_mid
                             sa_info["spamd_pid"] = target_pid
                             sa_info["raw_checking_line"] = line.strip()
+                            checking_idx = idx
                             break
 
-            if target_pid or found_mid:
-                for line in lines:
-                    if "spamd:" in line:
-                        m_ident = re_identified.search(line)
-                        if m_ident and (target_pid and f"spamd[{target_pid}]" in line):
-                            try:
-                                sa_info["score"] = float(m_ident.group("score"))
-                                sa_info["required_score"] = float(m_ident.group("req"))
-                            except ValueError:
-                                pass
+            if found_mid or mid_raw_str:
+                search_scope = lines[checking_idx:] if checking_idx != -1 else lines
 
-                        if "spamd: result:" in line:
-                            if (target_pid and f"spamd[{target_pid}]" in line) or (found_mid and found_mid in line):
-                                m_res = re_result.search(line)
-                                if m_res:
-                                    sa_info["raw_result_line"] = line.strip()
-                                    sa_info["is_spam"] = (m_res.group("flag") == 'Y')
-                                    if sa_info["score"] is None:
+                for i, line in enumerate(search_scope):
+                    if "spamd: result:" in line and mid_raw_str and mid_raw_str in line:
+                        m_res = re_result.search(line)
+                        if m_res:
+                            sa_info["raw_result_line"] = line.strip()
+                            sa_info["is_spam"] = (m_res.group("flag") == 'Y')
+
+                            rules_str = m_res.group("rules")
+                            sa_info["rules"] = [r.strip() for r in rules_str.split(",") if r.strip()]
+
+                            kv_str = m_res.group("kv")
+                            for kv in kv_str.split(","):
+                                if "=" in kv:
+                                    k, v = kv.split("=", 1)
+                                    k, v = k.strip(), v.strip()
+                                    if k == "required_score":
                                         try:
-                                            sa_info["score"] = float(m_res.group("score"))
+                                            sa_info["required_score"] = float(v)
                                         except ValueError:
                                             pass
+                                    elif k == "scantime":
+                                        sa_info["scantime"] = v
+                                    elif k == "size":
+                                        sa_info["size"] = v
 
-                                    rules_str = m_res.group("rules")
-                                    sa_info["rules"] = [r.strip() for r in rules_str.split(",") if r.strip()]
-
-                                    kv_str = m_res.group("kv")
-                                    for kv in kv_str.split(","):
-                                        if "=" in kv:
-                                            k, v = kv.split("=", 1)
-                                            k, v = k.strip(), v.strip()
-                                            if k == "required_score" and sa_info["required_score"] is None:
-                                                try:
-                                                    sa_info["required_score"] = float(v)
-                                                except ValueError:
-                                                    pass
-                                            elif k == "scantime":
-                                                sa_info["scantime"] = v
-                                            elif k == "size":
-                                                sa_info["size"] = v
-                                            elif k == "mid" and not sa_info["mid"]:
-                                                sa_info["mid"] = v
-                                    break
+                            start_adj = max(0, i - 2)
+                            end_adj = min(len(search_scope), i + 3)
+                            for adj_line in search_scope[start_adj:end_adj]:
+                                if f"spamd[{target_pid}]" in adj_line:
+                                    m_ident = re_identified.search(adj_line)
+                                    if m_ident:
+                                        try:
+                                            sa_info["score"] = float(m_ident.group("score"))
+                                            sa_info["required_score"] = float(m_ident.group("req"))
+                                        except ValueError:
+                                            pass
+                                    else:
+                                        m_clean = re_clean_msg.search(adj_line)
+                                        if m_clean:
+                                            try:
+                                                sa_info["score"] = float(m_clean.group("score"))
+                                                sa_info["required_score"] = float(m_clean.group("req"))
+                                            except ValueError:
+                                                pass
+                            break
         except Exception:
             continue
 
@@ -309,6 +321,7 @@ def search_maillog(domain, sender=None, timestamp_dt=None, custom_mail_log=None)
             break
 
     return sa_info
+
 
 
 def load_spamassassin_rules(custom_sa_dirs=None):
