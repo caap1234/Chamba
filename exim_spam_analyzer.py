@@ -521,8 +521,8 @@ def is_exim_id(target):
 
 def find_blocked_emails_by_query(query, custom_exim_log=None):
     """
-    Busca en los logs de Exim todos los correos rechazados por spam para un remitente o dominio.
-    Retorna una lista de diccionarios con la información básica de cada bloqueo.
+    Busca en los logs de Exim únicamente los correos SALIENTES (OUTGOING) rechazados por spam
+    para un remitente o dominio específico.
     """
     log_files = []
     if custom_exim_log:
@@ -531,7 +531,9 @@ def find_blocked_emails_by_query(query, custom_exim_log=None):
         for path in DEFAULT_EXIM_LOGS:
             log_files.extend(sorted(glob.glob(path + "*")))
 
-    query_lower = query.strip().lower()
+    query_clean = query.strip().lower()
+    is_email_query = "@" in query_clean
+
     blocked_list = []
     seen_ids = set()
 
@@ -549,7 +551,9 @@ def find_blocked_emails_by_query(query, custom_exim_log=None):
         try:
             with open_log_file(file_path) as f:
                 for line in f:
-                    if query_lower in line.lower() and ("rejected" in line.lower() or "spam" in line.lower()):
+                    line_lower = line.lower()
+                    # Filtrar estrictamente correos SALIENTES (OUTGOING) detectados como spam
+                    if "outgoing" in line_lower and ("spam" in line_lower or "rejected" in line_lower):
                         match = re_exim_line.search(line)
                         if match:
                             exim_id = match.group("exim_id")
@@ -558,13 +562,25 @@ def find_blocked_emails_by_query(query, custom_exim_log=None):
 
                             rest = match.group("rest")
                             m_sender = re_sender.search(rest)
-                            sender_addr = m_sender.group(1) if m_sender else "Desconocido"
-
-                            # Comprobar que coincida con el remitente o dominio consultado
-                            if query_lower not in sender_addr.lower() and query_lower not in rest.lower():
+                            if not m_sender:
                                 continue
 
-                            # Extraer score si está disponible en la línea de rechazo
+                            sender_addr = m_sender.group(1).strip()
+                            sender_lower = sender_addr.lower()
+                            domain_part = sender_lower.split("@")[-1] if "@" in sender_lower else ""
+
+                            # Verificar coincidencia exacta por Email o por Dominio
+                            match_query = False
+                            if is_email_query:
+                                if sender_lower == query_clean:
+                                    match_query = True
+                            else:
+                                if domain_part == query_clean or query_clean in sender_lower:
+                                    match_query = True
+
+                            if not match_query:
+                                continue
+
                             score_val = None
                             m_sc = re_score.search(rest)
                             if m_sc:
@@ -593,8 +609,8 @@ def find_blocked_emails_by_query(query, custom_exim_log=None):
 
 def prompt_user_input(prompt_text):
     """
-    Lee una entrada del usuario. Si sys.stdin alcanza EOF (común en 'wget | python3 -'),
-    hace fallback a la consola /dev/tty para permitir la interacción.
+    Lee una entrada del usuario desde sys.stdin. Si sys.stdin está en EOF (común en 'wget | python3 -'),
+    hace fallback a la consola /dev/tty sin duplicar el mensaje de prompt.
     """
     try:
         return input(prompt_text).strip()
@@ -602,12 +618,12 @@ def prompt_user_input(prompt_text):
         if os.path.exists('/dev/tty'):
             try:
                 with open('/dev/tty', 'r') as tty:
-                    sys.stdout.write(prompt_text)
                     sys.stdout.flush()
                     return tty.readline().strip()
             except Exception:
                 pass
         raise
+
 
 
 def main():
@@ -631,11 +647,12 @@ def main():
     if not target_input:
         try:
             target_input = prompt_user_input(
-                f"{Colors.BOLD}Ingrese Exim Message ID (ej: 1xE4Y8-000000027jC-3kxX) O Email/Dominio (ej: jcalvillo@cima.us): {Colors.ENDC}"
+                f"{Colors.BOLD}Ingrese Exim Message ID (ej: 1xXXXX-000000000XX-xxxx) O Email/Dominio (ej: usuario@dominio.com): {Colors.ENDC}"
             )
         except (KeyboardInterrupt, EOFError, Exception):
             print("\nOperación cancelada.")
             sys.exit(0)
+
 
     if not target_input:
         print(f"{Colors.FAIL}[!] Debe especificar un ID de Exim, correo o dominio válido.{Colors.ENDC}")
