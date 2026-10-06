@@ -594,10 +594,13 @@ def find_blocked_emails_by_query(query, custom_exim_log=None):
 def prompt_user_input(prompt_text):
     """Lee una entrada del usuario desde stdin o /dev/tty en caso de ejecuciones por pipe."""
     if not sys.stdin.isatty() and os.path.exists('/dev/tty'):
-        with open('/dev/tty', 'r') as tty:
-            sys.stdout.write(prompt_text)
-            sys.stdout.flush()
-            return tty.readline().strip()
+        try:
+            with open('/dev/tty', 'r') as tty:
+                sys.stdout.write(prompt_text)
+                sys.stdout.flush()
+                return tty.readline().strip()
+        except Exception:
+            pass
     return input(prompt_text).strip()
 
 
