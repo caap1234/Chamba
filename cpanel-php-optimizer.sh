@@ -345,51 +345,12 @@ log "URLs de prueba guardadas en $URLS_FILE"
 # ETAPA 4: BASELINE HTTP PRE-MIGRACIÓN
 # ============================================================
 
-stage "4" "18" "Obteniendo Diagnóstico HTTP de dominios (secuencial, 1 a la vez)..."
+stage "4" "18" "Diagnóstico HTTP pre-migración..."
 
 printf "domain\tpath\tfull_url\thttp_code\teffective_url\tredirect_count\tttfb_s\ttotal_time_s\ttimestamp\tcurl_result\n" > "$HTTP_BEFORE_FILE"
 
-run_http_test() {
-    local domain="$1"
-    local url_path="$2"
-    local outfile="$3"
-
-    local full_url="https://${domain}${url_path}"
-    local tmp="$WORKDIR/curl_tmp.$$.txt"
-
-    curl -kLsS \
-        --connect-timeout 5 \
-        --max-time 15 \
-        -o /dev/null \
-        -w "%{http_code}\t%{url_effective}\t%{num_redirects}\t%{time_starttransfer}\t%{time_total}\n" \
-        "$full_url" </dev/null 2>/dev/null > "$tmp" || echo -e "000\t${full_url}\t0\t0.000\t0.000" > "$tmp"
-
-    local code eff_url redirects ttfb total
-    read -r code eff_url redirects ttfb total < "$tmp"
-    rm -f "$tmp"
-
-    local result_str="OK"
-    if [[ "$code" == "000" ]]; then
-        result_str="CONNECT_ERROR"
-    fi
-
-    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
-        "$domain" "$url_path" "$full_url" "$code" "$eff_url" "$redirects" "$ttfb" "$total" "$(date '+%F %T')" "$result_str" >> "$outfile"
-}
-
-# Ejecutar diagnóstico HTTP dominio por dominio (secuencial para no elevar carga)
-if [ -s "$URLS_FILE" ]; then
-    while IFS=$'\t' read -r DOMAIN URL_PATH; do
-        [ -n "$DOMAIN" ] || continue
-        run_http_test "$DOMAIN" "$URL_PATH" "$HTTP_BEFORE_FILE"
-    done < "$URLS_FILE"
-
-    echo "Diagnóstico HTTP de dominios completado."
-    log "Diagnóstico HTTP guardado en $HTTP_BEFORE_FILE"
-else
-    echo "No se encontraron dominios activos para el diagnóstico HTTP."
-    log "No hay dominios activos en $URLS_FILE."
-fi
+echo -e "${YELLOW}Pruebas HTTP pre-migración omitidas para evitar carga en el servidor.${RESET}"
+log "Pruebas HTTP pre-migración omitidas a petición del usuario."
 
 # ============================================================
 # ETAPA 5: EVALUACIÓN DE MIGRACIÓN A PHP-FPM
@@ -566,30 +527,34 @@ with open(candidates_file, "w", newline="") as out:
 fi
 
 # ============================================================
-# ETAPAS 7 Y 8: MIGRACIÓN DOMINIO POR DOMINIO Y ROLLBACK POR REGRESIÓN
+# ETAPAS 7 Y 8: MIGRACIÓN DOMINIO POR DOMINIO A PHP-FPM
 # ============================================================
 
-stage "7" "18" "Migrando dominios a PHP-FPM y realizando verificación unitaria..."
+stage "7" "18" "Migrando dominios a PHP-FPM y generando script de rollback..."
 
 printf "domain\tpath\tfull_url\thttp_code\teffective_url\tredirect_count\tttfb_s\ttotal_time_s\ttimestamp\tcurl_result\n" > "$HTTP_AFTER_FILE"
 printf "domain\tbefore_code\tafter_code\tstatus\tnotes\n" > "$HTTP_COMPARE_FILE"
 
-CONSECUTIVE_REGRESSIONS=0
-GLOBAL_ABORT=0
+ROLLBACK_MIG_SCRIPT="${WORKDIR}/rollback_migration.sh"
+echo "#!/bin/bash" > "$ROLLBACK_MIG_SCRIPT"
+echo "# Script para revertir los dominios migrados a PHP-FPM en esta sesión" >> "$ROLLBACK_MIG_SCRIPT"
+echo "echo 'Revirtiendo dominios a su estado anterior en WHM (php_fpm=0)...'" >> "$ROLLBACK_MIG_SCRIPT"
+chmod +x "$ROLLBACK_MIG_SCRIPT"
+
+MIGRATED_DOMAINS_COUNT=0
 
 if [[ "$ENABLE_MIGRATION" == "1" ]]; then
+    echo -e "${YELLOW}Deteniendo Apache (httpd) durante la migración a PHP-FPM para evitar sobrecarga...${RESET}"
+    log "Deteniendo httpd antes de la migración de dominios a PHP-FPM"
+    /usr/local/cpanel/scripts/restartsrv_httpd --stop >/dev/null 2>&1 || systemctl stop httpd >/dev/null 2>&1 || true
+    HTTPD_STOPPED=1
+
     while IFS=$'\t' read -r DOMAIN ACCOUNT VERSION FPM SOURCE SUSPENDED HANDLER YAML PKG_INST CAT; do
         DOM_CLEAN=$(echo "$DOMAIN" | tr -d '\r')
         CAT_CLEAN=$(echo "$CAT" | tr -d '\r')
         [ "$DOM_CLEAN" = "domain" ] && continue
 
         if [[ "$CAT_CLEAN" != "CAN_ENABLE_FPM" ]]; then
-            continue
-        fi
-
-        if [[ "$GLOBAL_ABORT" == "1" ]]; then
-            echo -e "${YELLOW}OMITIDO $DOM_CLEAN (Global Abort activado por regresiones previas).${RESET}"
-            log "$DOM_CLEAN | SKIPPED | Global Abort"
             continue
         fi
 
@@ -609,94 +574,33 @@ except Exception:
     print(0)
 ')"
 
-        if [[ "$API_STATUS" != "1" ]]; then
+        if [[ "$API_STATUS" == "1" ]]; then
+            echo -e "  Estado: ${GREEN}[OK] PHP-FPM activado correctamente.${RESET}"
+            log "$DOM_CLEAN | SUCCESS FPM"
+            echo "whmapi1 php_set_vhost_versions version=\"$VERSION\" vhost=\"$DOM_CLEAN\" php_fpm=0" >> "$ROLLBACK_MIG_SCRIPT"
+            ((MIGRATED_DOMAINS_COUNT++))
+        else
             echo -e "  Estado: ${RED}ERROR API WHM${RESET}"
             log "$DOM_CLEAN | FAILED API"
-            continue
         fi
-
-        # 2. Re-verificar pruebas HTTP post migración para este dominio
-        DOMAIN_URLS=$(grep "^${DOM_CLEAN}"$'\t' "$URLS_FILE" || true)
-
-        HAS_REGRESSION=0
-
-        while IFS=$'\t' read -r _ DOM_PATH; do
-            [ -n "$DOM_PATH" ] || continue
-            run_http_test "$DOM_CLEAN" "$DOM_PATH" "$HTTP_AFTER_FILE"
-
-            # Comparar pre vs post para esta URL
-            python3 -c '
-import sys, csv
-
-before_file, after_file, domain, path, compare_file = sys.argv[1:6]
-
-def get_row(fpath, dom, pth):
-    with open(fpath) as f:
-        for r in csv.DictReader(f, delimiter="\t"):
-            if r["domain"] == dom and r["path"] == pth:
-                return r
-    return None
-
-b = get_row(before_file, domain, path)
-a = get_row(after_file, domain, path)
-
-b_code = int(b["http_code"]) if b and b["http_code"].isdigit() else 0
-a_code = int(a["http_code"]) if a and a["http_code"].isdigit() else 0
-
-if a_code == 0 or (b_code in (200, 301, 302) and a_code in (500, 502, 503, 504)):
-    status = "REGRESSION_CRITICAL"
-elif b_code == 200 and a_code == 200:
-    status = "OK"
-elif b_code == 301 and a_code == 301:
-    status = "OK"
-elif b_code in (500, 502, 503) and a_code in (500, 502, 503):
-    status = "EXISTING_ERROR"
-elif b_code == 403 and a_code == 403:
-    status = "UNCHANGED"
-elif b_code in (500, 502, 503) and a_code in (200, 301, 302):
-    status = "IMPROVED"
-elif b_code < 400 and a_code >= 400:
-    status = "REGRESSION_CRITICAL"
-else:
-    status = "CHANGED"
-
-with open(compare_file, "a", newline="") as out:
-    w = csv.writer(out, delimiter="\t", lineterminator="\n")
-    w.writerow([domain, b_code, a_code, status, f"path={path}"])
-
-if status == "REGRESSION_CRITICAL":
-    sys.exit(2)
-' "$HTTP_BEFORE_FILE" "$HTTP_AFTER_FILE" "$DOM_CLEAN" "$DOM_PATH" "$HTTP_COMPARE_FILE" </dev/null
-            RC=$?
-            if [[ $RC -eq 2 ]]; then
-                HAS_REGRESSION=1
-            fi
-        done <<< "$DOMAIN_URLS"
-
-        if [[ "$HAS_REGRESSION" == "1" ]]; then
-            echo -e "  Estado: ${RED}[REGRESSION_CRITICAL] Se detectó regresión HTTP.${RESET}"
-            log "$DOM_CLEAN | REGRESSION_CRITICAL | Realizando rollback de FPM..."
-
-            # Rollback unitario
-            whmapi1 --output=json php_set_vhost_versions version="$VERSION" vhost="$DOM_CLEAN" php_fpm=0 </dev/null >> "$LOG_FILE" 2>&1
-            echo -e "  Rollback: ${YELLOW}PHP-FPM desactivado para $DOM_CLEAN (versión $VERSION preservada).${RESET}"
-            log "$DOM_CLEAN | ROLLED_BACK"
-
-            ((CONSECUTIVE_REGRESSIONS++))
-
-            if [[ "$CONSECUTIVE_REGRESSIONS" -ge "$MAX_CONSECUTIVE_REGRESSIONS" ]]; then
-                echo -e "${RED}[GLOBAL_ABORT] Se detectaron $CONSECUTIVE_REGRESSIONS regresiones consecutivas. Deteniendo nuevas migraciones.${RESET}"
-                log "GLOBAL_ABORT disparado a las $CONSECUTIVE_REGRESSIONS regresiones."
-                GLOBAL_ABORT=1
-            fi
-        else
-            echo -e "  Estado: ${GREEN}[OK] PHP-FPM activado y validado sin regresiones.${RESET}"
-            log "$DOM_CLEAN | SUCCESS FPM"
-            CONSECUTIVE_REGRESSIONS=0
-        fi
-
-        echo
     done < "$MIGRATION_CANDIDATES"
+
+    echo "echo 'Rollback de PHP-FPM finalizado. Reiniciando Apache...'" >> "$ROLLBACK_MIG_SCRIPT"
+    echo "/usr/local/cpanel/scripts/restartsrv_httpd --hard" >> "$ROLLBACK_MIG_SCRIPT"
+
+    echo -e "${GREEN}Reiniciando Apache (httpd)...${RESET}"
+    log "Reiniciando httpd tras finalizar la migración de dominios"
+    /usr/local/cpanel/scripts/restartsrv_httpd --start >/dev/null 2>&1 || systemctl start httpd >/dev/null 2>&1 || true
+    HTTPD_STOPPED=0
+
+    if [[ "$MIGRATED_DOMAINS_COUNT" -gt 0 ]]; then
+        echo
+        echo -e "${GREEN}Se completó la migración de $MIGRATED_DOMAINS_COUNT dominios a PHP-FPM.${RESET}"
+        echo -e "${YELLOW}Script de Rollback preparado en caso de requerir reversión:${RESET}"
+        echo "  bash $ROLLBACK_MIG_SCRIPT"
+        echo
+        log "Rollback script generado en $ROLLBACK_MIG_SCRIPT"
+    fi
 fi
 
 # ============================================================
