@@ -514,12 +514,99 @@ def format_visual_report(exim_data, sa_data, rule_db):
     print()
 
 
+def is_exim_id(target):
+    """Verifica si la cadena tiene el formato característico de un ID de Exim (ej: 1xE4Y8-000000027jC-3kxX)."""
+    return bool(re.match(r'^[a-zA-Z0-9]{6}-[a-zA-Z0-9]{11}-[a-zA-Z0-9]{2,6}$', target.strip()))
+
+
+def find_blocked_emails_by_query(query, custom_exim_log=None):
+    """
+    Busca en los logs de Exim todos los correos rechazados por spam para un remitente o dominio.
+    Retorna una lista de diccionarios con la información básica de cada bloqueo.
+    """
+    log_files = []
+    if custom_exim_log:
+        log_files.append(custom_exim_log)
+    else:
+        for path in DEFAULT_EXIM_LOGS:
+            log_files.extend(sorted(glob.glob(path + "*")))
+
+    query_lower = query.strip().lower()
+    blocked_list = []
+    seen_ids = set()
+
+    re_exim_line = re.compile(
+        r'^(?P<date>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+'
+        r'(?P<exim_id>[a-zA-Z0-9]{6}-[a-zA-Z0-9]{11}-[a-zA-Z0-9]{2,6})\s+'
+        r'(?P<rest>.*)$'
+    )
+    re_sender = re.compile(r'F=<([^>]+)>')
+    re_score = re.compile(r'spam\s*\(([\d\.]+)\)')
+
+    for file_path in log_files:
+        if not os.path.exists(file_path):
+            continue
+        try:
+            with open_log_file(file_path) as f:
+                for line in f:
+                    if query_lower in line.lower() and ("rejected" in line.lower() or "spam" in line.lower()):
+                        match = re_exim_line.search(line)
+                        if match:
+                            exim_id = match.group("exim_id")
+                            if exim_id in seen_ids:
+                                continue
+
+                            rest = match.group("rest")
+                            m_sender = re_sender.search(rest)
+                            sender_addr = m_sender.group(1) if m_sender else "Desconocido"
+
+                            # Comprobar que coincida con el remitente o dominio consultado
+                            if query_lower not in sender_addr.lower() and query_lower not in rest.lower():
+                                continue
+
+                            # Extraer score si está disponible en la línea de rechazo
+                            score_val = None
+                            m_sc = re_score.search(rest)
+                            if m_sc:
+                                try:
+                                    score_val = float(m_sc.group(1))
+                                except ValueError:
+                                    pass
+
+                            date_str = match.group("date")
+                            seen_ids.add(exim_id)
+
+                            blocked_list.append({
+                                "exim_id": exim_id,
+                                "date": date_str,
+                                "sender": sender_addr,
+                                "score": score_val,
+                                "raw_line": line.strip()
+                            })
+        except Exception:
+            continue
+
+    # Ordenar del más reciente al más antiguo
+    blocked_list.sort(key=lambda x: x["date"], reverse=True)
+    return blocked_list
+
+
+def prompt_user_input(prompt_text):
+    """Lee una entrada del usuario desde stdin o /dev/tty en caso de ejecuciones por pipe."""
+    if not sys.stdin.isatty() and os.path.exists('/dev/tty'):
+        with open('/dev/tty', 'r') as tty:
+            sys.stdout.write(prompt_text)
+            sys.stdout.flush()
+            return tty.readline().strip()
+    return input(prompt_text).strip()
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Analiza la correlación de reglas de SpamAssassin para un ID de Exim.",
+        description="Analiza la correlación de reglas de SpamAssassin para un ID de Exim, Email o Dominio.",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("exim_id", nargs="?", help="ID del mensaje en Exim (ej: 1xE4Y8-000000027jC-3kxX)")
+    parser.add_argument("target", nargs="?", help="ID de Exim (ej: 1xE4Y8-000000027jC-3kxX) O Email/Dominio (ej: usuario@dominio.com)")
     parser.add_argument("--exim-log", help="Ruta personalizada a exim_mainlog")
     parser.add_argument("--mail-log", help="Ruta personalizada a maillog")
     parser.add_argument("--sa-dirs", nargs="+", help="Directorios de reglas de SpamAssassin")
@@ -530,33 +617,78 @@ def main():
     if args.no_color or not sys.stdout.isatty():
         Colors.disable()
 
-    exim_id = args.exim_id
+    target_input = args.target
 
-    # Si se ejecuta mediante pipe (wget | python3 -), sys.stdin no es una TTY.
-    # Para permitir lectura interactiva del ID, leemos directamente desde la consola /dev/tty.
-    if not exim_id:
+    if not target_input:
         try:
-            if not sys.stdin.isatty() and os.path.exists('/dev/tty'):
-                with open('/dev/tty', 'r') as tty:
-                    sys.stdout.write(f"{Colors.BOLD}Ingrese el Exim Message ID (ej: 1xE4Y8-000000027jC-3kxX): {Colors.ENDC}")
-                    sys.stdout.flush()
-                    exim_id = tty.readline().strip()
-            else:
-                exim_id = input(f"{Colors.BOLD}Ingrese el Exim Message ID (ej: 1xE4Y8-000000027jC-3kxX): {Colors.ENDC}").strip()
+            target_input = prompt_user_input(
+                f"{Colors.BOLD}Ingrese Exim Message ID (ej: 1xE4Y8-000000027jC-3kxX) O Email/Dominio (ej: jcalvillo@cima.us): {Colors.ENDC}"
+            )
         except (KeyboardInterrupt, EOFError, Exception):
             print("\nOperación cancelada.")
             sys.exit(0)
 
-    if not exim_id:
-        print(f"{Colors.FAIL}[!] Debe especificar un ID de Exim válido.{Colors.ENDC}")
+    if not target_input:
+        print(f"{Colors.FAIL}[!] Debe especificar un ID de Exim, correo o dominio válido.{Colors.ENDC}")
         sys.exit(1)
 
-    print(f"{Colors.GRAY}[i] Buscando ID '{exim_id}' en los logs de Exim...{Colors.ENDC}")
+    target_input = target_input.strip()
+    exim_id = None
+
+    # Si la entrada es un Exim ID directo, procedemos directo al análisis
+    if is_exim_id(target_input):
+        exim_id = target_input
+    else:
+        # Si es un email o dominio, buscamos todos los bloqueos registrados para esa cuenta
+        print(f"{Colors.GRAY}[i] Buscando bloqueos por spam para '{target_input}' en los logs de Exim...{Colors.ENDC}")
+        matches = find_blocked_emails_by_query(target_input, custom_exim_log=args.exim_log)
+
+        if not matches:
+            print(f"{Colors.FAIL}[!] No se encontraron bloqueos de spam para '{target_input}' en los logs de Exim.{Colors.ENDC}")
+            sys.exit(1)
+
+        print()
+        print(f"{Colors.BOLD}{Colors.OKCYAN}╔══════════════════════════════════════════════════════════════════════════════════════════════════════╗{Colors.ENDC}")
+        print(f"{Colors.BOLD}{Colors.OKCYAN}║             BLOQUEOS POR SPAM ENCONTRADOS PARA: {target_input:<44} ║{Colors.ENDC}")
+        print(f"{Colors.BOLD}{Colors.OKCYAN}╚══════════════════════════════════════════════════════════════════════════════════════════════════════╝{Colors.ENDC}")
+        print()
+
+        print(f"┌──────┬─────────────────────┬──────────────────────────┬──────────┬──────────────────────────────────────┐")
+        print(f"│ {Colors.BOLD}OPC  {Colors.ENDC}│ {Colors.BOLD}FECHA Y HORA        {Colors.ENDC}│ {Colors.BOLD}EXIM MESSAGE ID          {Colors.ENDC}│ {Colors.BOLD}PUNTAJE  {Colors.ENDC}│ {Colors.BOLD}REMITENTE                            {Colors.ENDC}│")
+        print(f"├──────┼─────────────────────┼──────────────────────────┼──────────┼──────────────────────────────────────┤")
+
+        for idx, item in enumerate(matches, 1):
+            score_disp = f"{item['score']:.1f}" if item['score'] is not None else "N/A"
+            sender_disp = item['sender'][:36]
+            print(f"│ {Colors.BOLD}[{idx:^2}]{Colors.ENDC} │ {item['date']} │ {Colors.WARNING}{item['exim_id']:<24}{Colors.ENDC} │ {Colors.FAIL}{score_disp:^8}{Colors.ENDC} │ {sender_disp:<36} │")
+
+        print(f"└──────┴─────────────────────┴──────────────────────────┴──────────┴──────────────────────────────────────┘")
+        print()
+
+        # Si solo se encontró 1 correo, podemos seleccionarlo automáticamente o preguntar
+        if len(matches) == 1:
+            print(f"{Colors.OKGREEN}[i] Se encontró 1 único correo bloqueado. Seleccionando automáticamente ID '{matches[0]['exim_id']}'...{Colors.ENDC}")
+            exim_id = matches[0]['exim_id']
+        else:
+            try:
+                selected_str = prompt_user_input(
+                    f"{Colors.BOLD}Seleccione el número de correo que desea analizar [1-{len(matches)}]: {Colors.ENDC}"
+                )
+                if not selected_str.isdigit() or not (1 <= int(selected_str) <= len(matches)):
+                    print(f"{Colors.FAIL}[!] Selección no válida.{Colors.ENDC}")
+                    sys.exit(1)
+
+                exim_id = matches[int(selected_str) - 1]['exim_id']
+            except (KeyboardInterrupt, EOFError, Exception):
+                print("\nOperación cancelada.")
+                sys.exit(0)
+
+    # Con el Exim ID ya seleccionado, ejecutamos el análisis profundo
+    print(f"\n{Colors.GRAY}[i] Buscando detalles del ID '{exim_id}' en los logs de Exim...{Colors.ENDC}")
     exim_data = search_exim_log(exim_id, custom_exim_log=args.exim_log)
 
     if not exim_data["timestamp_str"] and not exim_data["domain"]:
         print(f"{Colors.FAIL}[!] No se encontró el ID '{exim_id}' en el log de Exim.{Colors.ENDC}")
-        print(f"{Colors.WARNING}Verifique que el ID sea correcto y que las rutas de log existan.{Colors.ENDC}")
         sys.exit(1)
 
     print(f"{Colors.GRAY}[i] Remitente detectado: {exim_data['sender'] or 'N/A'}, Dominio: {exim_data['domain'] or 'N/A'}{Colors.ENDC}")
@@ -577,5 +709,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
