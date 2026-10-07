@@ -196,11 +196,55 @@ def search_exim_log(exim_id, custom_exim_log=None):
     return details
 
 
-def search_maillog(domain, sender=None, timestamp_dt=None, custom_mail_log=None):
+MONTH_MAP = {
+    'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4, 'May': 5, 'Jun': 6,
+    'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12
+}
+
+
+def parse_syslog_timestamp(line, reference_year=None):
+    """Extrae un objeto datetime de una línea de registro syslog tradicional o ISO."""
+    if reference_year is None:
+        reference_year = datetime.now().year
+
+    # Formato ISO: 2026-10-07T16:50:11... o 2026-10-07 16:50:11
+    m_iso = re.search(r'^(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})[T\s]+(?P<hour>\d{2}):(?P<min>\d{2}):(?P<sec>\d{2})', line)
+    if m_iso:
+        try:
+            return datetime(
+                int(m_iso.group("year")),
+                int(m_iso.group("month")),
+                int(m_iso.group("day")),
+                int(m_iso.group("hour")),
+                int(m_iso.group("min")),
+                int(m_iso.group("sec"))
+            )
+        except ValueError:
+            pass
+
+    # Formato Syslog tradicional: Oct  7 16:50:11 o Oct 07 16:50:11
+    m_sys = re.search(r'^(?P<month>[A-Z][a-z]{2})\s+(?P<day>\d+)\s+(?P<hour>\d{2}):(?P<min>\d{2}):(?P<sec>\d{2})', line)
+    if m_sys:
+        month_num = MONTH_MAP.get(m_sys.group("month"))
+        if month_num:
+            try:
+                return datetime(
+                    reference_year,
+                    month_num,
+                    int(m_sys.group("day")),
+                    int(m_sys.group("hour")),
+                    int(m_sys.group("min")),
+                    int(m_sys.group("sec"))
+                )
+            except ValueError:
+                pass
+    return None
+
+
+def search_maillog(domain, sender=None, timestamp_dt=None, score_from_exim=None, custom_mail_log=None):
     """
-    Busca en maillog las líneas de spamd asociadas al dominio/remitente y la hora cercana.
-    Vincular estrictamente por el Message-ID exacto (<...>) para evitar cruzar información
-    con otros correos procesados por el mismo PID de spamd.
+    Busca en maillog el resultado de spamd correlacionando por hora de envío,
+    puntaje reportado por Exim, Message-ID y coincidencia de usuario/dominio.
     """
     log_files = []
     if custom_mail_log:
@@ -222,24 +266,15 @@ def search_maillog(domain, sender=None, timestamp_dt=None, custom_mail_log=None)
         "raw_result_line": None
     }
 
-    time_patterns = []
-    if timestamp_dt:
-        time_patterns.append(timestamp_dt.strftime("%b %e %H:%M"))
-        time_patterns.append(timestamp_dt.strftime("%b %d %H:%M"))
-        time_patterns.append(timestamp_dt.strftime("%H:%M"))
-
-    re_checking = re.compile(r'spamd\[(?P<pid>\d+)\]:\s*spamd:\s*checking message\s*<(?P<mid>[^>]+)>\s*for\s*(?P<user>\S+)')
-    re_identified = re.compile(r'spamd\[(?P<pid>\d+)\]:\s*spamd:\s*identified spam \((?P<score>[\d\.]+)\/(?P<req>[\d\.]+)\)')
-    re_clean_msg = re.compile(r'spamd\[(?P<pid>\d+)\]:\s*spamd:\s*clean message \((?P<score>[\d\.-]+)\/(?P<req>[\d\.]+)\)')
     re_result = re.compile(
         r'spamd\[(?P<pid>\d+)\]:\s*spamd:\s*result:\s*(?P<flag>[YN])\s+'
-        r'(?P<score>[\d\.-]+)\s*-\s*(?P<rules>[A-Z0-9_,]+)\s+'
+        r'(?P<score>[\d\.-]+)\s*-\s*(?P<rules>[A-Z0-9_,]+)\s*'
         r'(?P<kv>.*)'
     )
+    re_checking = re.compile(r'spamd\[(?P<pid>\d+)\]:\s*spamd:\s*checking message\s*<(?P<mid>[^>]+)>')
 
-    found_mid = None
-    target_pid = None
-    mid_raw_str = None
+    ref_year = timestamp_dt.year if timestamp_dt else datetime.now().year
+    candidates = []
 
     for file_path in log_files:
         if not os.path.exists(file_path):
@@ -248,77 +283,140 @@ def search_maillog(domain, sender=None, timestamp_dt=None, custom_mail_log=None)
             with open_log_file(file_path) as f:
                 lines = f.readlines()
 
-            checking_idx = -1
             for idx, line in enumerate(lines):
-                if "spamd:" in line and "checking message" in line:
-                    match_domain = (domain and domain.lower() in line.lower()) or (sender and sender.lower() in line.lower())
-                    match_time = any(tp in line for tp in time_patterns) if time_patterns else True
+                if "spamd: result:" not in line:
+                    continue
 
-                    if match_domain and match_time:
-                        m = re_checking.search(line)
-                        if m:
-                            mid_raw_str = m.group("mid")
-                            found_mid = "<" + mid_raw_str + ">"
-                            target_pid = m.group("pid")
-                            sa_info["mid"] = found_mid
-                            sa_info["spamd_pid"] = target_pid
-                            sa_info["raw_checking_line"] = line.strip()
-                            checking_idx = idx
-                            break
+                m_res = re_result.search(line)
+                if not m_res:
+                    continue
 
-            if found_mid or mid_raw_str:
-                search_scope = lines[checking_idx:] if checking_idx != -1 else lines
+                pid = m_res.group("pid")
+                flag = m_res.group("flag")
+                try:
+                    score = float(m_res.group("score"))
+                except ValueError:
+                    score = 0.0
 
-                for i, line in enumerate(search_scope):
-                    if "spamd: result:" in line and mid_raw_str and mid_raw_str in line:
-                        m_res = re_result.search(line)
-                        if m_res:
-                            sa_info["raw_result_line"] = line.strip()
-                            sa_info["is_spam"] = (m_res.group("flag") == 'Y')
+                rules_str = m_res.group("rules")
+                rules = [r.strip() for r in rules_str.split(",") if r.strip()]
 
-                            rules_str = m_res.group("rules")
-                            sa_info["rules"] = [r.strip() for r in rules_str.split(",") if r.strip()]
+                kv_str = m_res.group("kv")
+                kv_dict = {}
+                for item in kv_str.split(","):
+                    if "=" in item:
+                        k, v = item.split("=", 1)
+                        kv_dict[k.strip()] = v.strip()
 
-                            kv_str = m_res.group("kv")
-                            for kv in kv_str.split(","):
-                                if "=" in kv:
-                                    k, v = kv.split("=", 1)
-                                    k, v = k.strip(), v.strip()
-                                    if k == "required_score":
-                                        try:
-                                            sa_info["required_score"] = float(v)
-                                        except ValueError:
-                                            pass
-                                    elif k == "scantime":
-                                        sa_info["scantime"] = v
-                                    elif k == "size":
-                                        sa_info["size"] = v
+                mid = kv_dict.get("mid")
+                user = kv_dict.get("user")
+                scantime = kv_dict.get("scantime")
+                size = kv_dict.get("size")
+                req_score = None
+                if "required_score" in kv_dict:
+                    try:
+                        req_score = float(kv_dict["required_score"])
+                    except ValueError:
+                        pass
 
-                            start_adj = max(0, i - 2)
-                            end_adj = min(len(search_scope), i + 3)
-                            for adj_line in search_scope[start_adj:end_adj]:
-                                if f"spamd[{target_pid}]" in adj_line:
-                                    m_ident = re_identified.search(adj_line)
-                                    if m_ident:
-                                        try:
-                                            sa_info["score"] = float(m_ident.group("score"))
-                                            sa_info["required_score"] = float(m_ident.group("req"))
-                                        except ValueError:
-                                            pass
-                                    else:
-                                        m_clean = re_clean_msg.search(adj_line)
-                                        if m_clean:
-                                            try:
-                                                sa_info["score"] = float(m_clean.group("score"))
-                                                sa_info["required_score"] = float(m_clean.group("req"))
-                                            except ValueError:
-                                                pass
-                            break
+                # Si no viene mid en las llaves, buscar la línea checking message de este PID
+                if not mid:
+                    start_search = max(0, idx - 15)
+                    for prev_line in lines[start_search:idx]:
+                        if f"spamd[{pid}]" in prev_line and "checking message" in prev_line:
+                            m_chk = re_checking.search(prev_line)
+                            if m_chk:
+                                mid = m_chk.group("mid")
+                                break
+
+                if mid and not mid.startswith("<"):
+                    mid = f"<{mid}>"
+
+                # Calcular coincidencia (confidence)
+                line_dt = parse_syslog_timestamp(line, reference_year=ref_year)
+                confidence = 0
+
+                # 1. Proximidad de tiempo con la fecha/hora de Exim
+                if timestamp_dt and line_dt:
+                    time_diff = abs((line_dt - timestamp_dt).total_seconds())
+                    if time_diff <= 5:
+                        confidence += 40
+                    elif time_diff <= 20:
+                        confidence += 30
+                    elif time_diff <= 60:
+                        confidence += 15
+                    elif time_diff <= 300:
+                        confidence += 5
+                    else:
+                        confidence -= int(time_diff / 10)
+
+                # 2. Coincidencia de Puntaje con el detectado en Exim
+                if score_from_exim is not None:
+                    score_diff = abs(score - score_from_exim)
+                    if score_diff < 0.05:
+                        confidence += 50
+                    elif score_diff < 0.15:
+                        confidence += 40
+                    elif score_diff < 0.5:
+                        confidence += 20
+                    else:
+                        confidence -= int(score_diff * 10)
+
+                # 3. Coincidencia de Dominio / Remitente / Usuario cPanel
+                line_lower = line.lower()
+                domain_clean = domain.lower() if domain else ""
+                sender_clean = sender.lower() if sender else ""
+
+                # Contexto de líneas cercanas con el mismo PID
+                context_text = line_lower
+                start_ctx = max(0, idx - 5)
+                end_ctx = min(len(lines), idx + 3)
+                for ctx_line in lines[start_ctx:end_ctx]:
+                    if f"spamd[{pid}]" in ctx_line:
+                        context_text += " " + ctx_line.lower()
+
+                if sender_clean and sender_clean in context_text:
+                    confidence += 60
+                elif domain_clean and domain_clean in context_text:
+                    confidence += 50
+                elif user:
+                    user_clean = user.lower()
+                    domain_no_dot = domain_clean.replace(".", "")
+                    if user_clean and (user_clean in domain_clean or user_clean in domain_no_dot or domain_clean.startswith(user_clean)):
+                        confidence += 35
+
+                candidates.append({
+                    "confidence": confidence,
+                    "mid": mid,
+                    "pid": pid,
+                    "is_spam": (flag == 'Y'),
+                    "score": score,
+                    "required_score": req_score,
+                    "rules": rules,
+                    "scantime": scantime,
+                    "size": size,
+                    "raw_result_line": line.strip()
+                })
         except Exception:
             continue
 
-        if sa_info["rules"]:
-            break
+    if not candidates:
+        return sa_info
+
+    # Seleccionar el candidato con mayor nivel de confianza
+    candidates.sort(key=lambda x: x["confidence"], reverse=True)
+    best = candidates[0]
+
+    if best["confidence"] > -50:
+        sa_info["mid"] = best["mid"]
+        sa_info["spamd_pid"] = best["pid"]
+        sa_info["is_spam"] = best["is_spam"]
+        sa_info["score"] = best["score"]
+        sa_info["required_score"] = best["required_score"]
+        sa_info["rules"] = best["rules"]
+        sa_info["scantime"] = best["scantime"]
+        sa_info["size"] = best["size"]
+        sa_info["raw_result_line"] = best["raw_result_line"]
 
     return sa_info
 
@@ -737,6 +835,7 @@ def main():
         domain=exim_data["domain"],
         sender=exim_data["sender"],
         timestamp_dt=exim_data["timestamp_dt"],
+        score_from_exim=exim_data["score_from_exim"],
         custom_mail_log=args.mail_log
     )
 
