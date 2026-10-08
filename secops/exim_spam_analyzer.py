@@ -36,10 +36,12 @@ DEFAULT_MAIL_LOGS = [
 ]
 
 DEFAULT_SA_DIRS = [
-    "/etc/mail/spamassassin",
     "/usr/share/spamassassin",
     "/var/lib/spamassassin",
-    "/etc/spamassassin"
+    "/etc/mail/spamassassin",
+    "/etc/spamassassin",
+    "/usr/local/cpanel/etc/spamassassin",
+    "/var/spool/spamd"
 ]
 
 # --- Códigos de Color ANSI para la CLI ---
@@ -430,7 +432,8 @@ def load_spamassassin_rules(custom_sa_dirs=None):
     cf_files = []
     for d in sa_dirs:
         if os.path.isdir(d):
-            cf_files.extend(glob.glob(os.path.join(d, "**", "*.cf"), recursive=True))
+            found_files = sorted(glob.glob(os.path.join(d, "**", "*.cf"), recursive=True))
+            cf_files.extend(found_files)
 
     rule_database = {}
 
@@ -452,20 +455,9 @@ def load_spamassassin_rules(custom_sa_dirs=None):
                         try:
                             score_floats = [float(s) for s in raw_scores]
                             if rule_name not in rule_database:
-                                rule_database[rule_name] = {"score": 0.0, "scores_all": [], "description": None}
+                                rule_database[rule_name] = {"scores_all": [], "description": None}
                             
                             rule_database[rule_name]["scores_all"] = score_floats
-                            
-                            if len(score_floats) == 4:
-                                selected_score = score_floats[3]
-                            elif len(score_floats) == 2:
-                                selected_score = score_floats[1]
-                            elif len(score_floats) > 0:
-                                selected_score = score_floats[0]
-                            else:
-                                selected_score = 0.0
-
-                            rule_database[rule_name]["score"] = selected_score
                         except ValueError:
                             pass
 
@@ -474,7 +466,7 @@ def load_spamassassin_rules(custom_sa_dirs=None):
                         rule_name = m_desc.group(1)
                         desc_text = m_desc.group(2).strip()
                         if rule_name not in rule_database:
-                            rule_database[rule_name] = {"score": 0.0, "scores_all": [], "description": desc_text}
+                            rule_database[rule_name] = {"scores_all": [], "description": desc_text}
                         else:
                             rule_database[rule_name]["description"] = desc_text
         except Exception:
@@ -538,14 +530,28 @@ def format_visual_report(exim_data, sa_data, rule_db):
         print(f"  {Colors.WARNING}No se encontraron listas de reglas en maillog.{Colors.ENDC}")
         return
 
+    # Verificar si el filtro Bayesiano se activó en este correo
+    has_bayes = any(r.startswith("BAYES_") for r in sa_data['rules'])
+
     analyzed_rules = []
     total_positive_score = 0.0
 
     for rule_name in sa_data['rules']:
         info = rule_db.get(rule_name, {})
-        score = info.get("score", 0.0)
+        scores_all = info.get("scores_all", [])
         desc = info.get("description")
         
+        # Seleccionar puntaje del Score Set adecuado:
+        # Set 0: No Bayes, No Net | Set 1: No Bayes, Net | Set 2: Bayes, No Net | Set 3: Bayes, Net
+        if len(scores_all) == 4:
+            score = scores_all[3] if has_bayes else scores_all[1]
+        elif len(scores_all) == 2:
+            score = scores_all[1]
+        elif len(scores_all) > 0:
+            score = scores_all[0]
+        else:
+            score = 0.0
+
         if not desc or desc.startswith("Sin descripción"):
             desc = FALLBACK_DESCRIPTIONS.get(rule_name, desc or "Sin descripción en archivos de configuración")
 
@@ -608,6 +614,13 @@ def format_visual_report(exim_data, sa_data, rule_db):
 
     # --- Sección 4: Conclusión de Bloqueo ---
     print(f"{Colors.BOLD}{Colors.HEADER}─── 4. CONCLUSIÓN Y REGLAS CLAVE DEL BLOQUEO {'─' * (box_width - 46)}{Colors.ENDC}")
+    
+    calculated_net = sum(r["score"] for r in analyzed_rules)
+    if final_score is not None and abs(calculated_net - final_score) >= 0.2:
+        print(f"  • {Colors.WARNING}Nota sobre Puntaje:{Colors.ENDC} El puntaje total registrado en logs por spamd fue {Colors.BOLD}{final_score:.1f}{Colors.ENDC}, "
+              f"mientras que la suma de reglas estáticas locales da {Colors.BOLD}{calculated_net:.3f}{Colors.ENDC}.")
+        print(f"    └─ Detalle: Esta diferencia se debe a reglas dinámicas/plugins en tiempo de ejecución o configuraciones específicas en user_prefs de cpaneleximscanner.")
+
     top_rules = [r for r in analyzed_rules if r["score"] > 0]
     if top_rules:
         top_rule = top_rules[0]
