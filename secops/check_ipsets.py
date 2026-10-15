@@ -60,6 +60,11 @@ SOURCES = {
         "url": "https://openai.com/gptbot.json",
     },
 
+    "ChatGPTConnectors": {
+        "type": "json",
+        "url": "https://openai.com/chatgpt-connectors.json",
+    },
+
     "Anthropic": {
         "type": "static",
         "ranges": [
