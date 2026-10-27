@@ -789,6 +789,10 @@ class IrisClient:
         case_data = case_res["case"]
         evidences = case_res.get("evidences", [])
         iocs = case_res.get("iocs", [])
+        notes = case_res.get("notes", [])
+        case_data["notes"] = notes
+        case_data["iocs"] = iocs
+        case_data["evidences"] = evidences
 
         template_path = config.BASE_DIR / "templates" / template_filename
         if not template_path.exists():
@@ -807,7 +811,7 @@ class IrisClient:
                 case=case_data,
                 evidences=evidences,
                 evidences_images=evidences_images,
-                notes=[],
+                notes=notes,
                 iocs=iocs
             )
 
