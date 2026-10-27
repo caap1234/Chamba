@@ -45,6 +45,16 @@ function parseMarkdownSafe(mdText) {
   return mdText.replace(/\n/g, "<br>");
 }
 
+function escapeHtml(str) {
+  if (str === null || str === undefined) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
 // -------------------------------------------------------------
 // Top Navigation Views (Ingest vs Cases)
 // -------------------------------------------------------------
@@ -1432,9 +1442,11 @@ async function openEditModal(caseId) {
               data-note-id="${n.note_id || ''}"
               data-title="${escapeHtml(n.note_title)}"
               rows="6"
-            >${escapeHtml(n.note_content)}</textarea>
+            ></textarea>
             <div class="rendered-note-view hidden" id="edit-modal-note-preview-${idx}"></div>
           `;
+          const ta = card.querySelector("textarea");
+          if (ta) ta.value = n.note_content || "";
           notesContainer.appendChild(card);
         });
       }
