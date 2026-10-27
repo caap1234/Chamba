@@ -216,26 +216,48 @@ def markdown_to_executive_html(
       font-style: italic;
     }}
 
-    .report-content code {{
+    .report-content p code,
+    .report-content li code {{
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      font-size: 9pt;
+      font-size: 8.5pt;
       background: #f1f5f9;
       padding: 2px 5px;
       border-radius: 4px;
       color: #b91c1c;
       border: 1px solid #e2e8f0;
+      word-break: break-word;
+      overflow-wrap: anywhere;
     }}
 
     .report-content pre {{
       background: #f8fafc;
-      border: 1px solid #e2e8f0;
+      border: 1px solid #cbd5e1;
       border-radius: 6px;
       padding: 10px 14px;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      font-size: 8.5pt;
-      overflow-x: auto;
+      font-size: 7.8pt;
+      line-height: 1.45;
       margin: 12px 0;
-      page-break-inside: avoid;
+      white-space: pre-wrap !important;
+      word-break: break-all !important;
+      overflow-wrap: anywhere !important;
+      page-break-inside: auto;
+      break-inside: auto;
+      color: #1e293b;
+    }}
+
+    .report-content pre code {{
+      background: transparent !important;
+      padding: 0 !important;
+      border: none !important;
+      border-radius: 0 !important;
+      color: #1e293b !important;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 7.8pt;
+      line-height: 1.45;
+      white-space: pre-wrap !important;
+      word-break: break-all !important;
+      overflow-wrap: anywhere !important;
     }}
 
     .report-content table {{

@@ -1301,6 +1301,38 @@ body {
   padding: 2px 5px;
   border-radius: 4px;
   border: 1px solid rgba(255, 255, 255, 0.06);
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.rendered-markdown-view pre, .rendered-note-view pre {
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  margin: 10px 0;
+  white-space: pre-wrap !important;
+  word-break: break-all !important;
+  overflow-wrap: anywhere !important;
+  color: #e2e8f0;
+  box-sizing: border-box;
+  max-width: 100%;
+}
+
+.rendered-markdown-view pre code, .rendered-note-view pre code {
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  color: #e2e8f0 !important;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  white-space: pre-wrap !important;
+  word-break: break-all !important;
+  overflow-wrap: anywhere !important;
 }
 
 .rendered-markdown-view strong, .rendered-note-view strong {
@@ -1631,6 +1663,39 @@ body {
   border: 1px solid #e2e8f0;
   font-family: var(--font-mono);
   font-size: 0.85em;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.report-paper pre {
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 12px 14px;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  line-height: 1.45;
+  margin: 12px 0;
+  white-space: pre-wrap !important;
+  word-break: break-all !important;
+  overflow-wrap: anywhere !important;
+  color: #1e293b;
+  box-sizing: border-box;
+  max-width: 100%;
+}
+
+.report-paper pre code {
+  background: transparent !important;
+  padding: 0 !important;
+  border: none !important;
+  border-radius: 0 !important;
+  color: #1e293b !important;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  line-height: 1.45;
+  white-space: pre-wrap !important;
+  word-break: break-all !important;
+  overflow-wrap: anywhere !important;
 }
 
 .report-paper ul, .report-paper ol {
