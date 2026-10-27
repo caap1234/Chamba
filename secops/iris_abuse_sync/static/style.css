@@ -1608,6 +1608,32 @@ body {
   background: rgba(255, 255, 255, 0.015);
 }
 
+.form-section-title {
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+  display: block;
+}
+
+.edit-notes-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 380px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.edit-iocs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
 .report-status-hint {
   margin-right: auto;
   font-size: 0.82rem;

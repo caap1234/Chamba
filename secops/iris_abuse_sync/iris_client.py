@@ -179,18 +179,17 @@ class IrisClient:
                 "payload": post_data
             }
 
-        # 4. Attach Notes
-        notes_created = []
-        for note in case_payload.get("notes", []):
-            self._add_note(case_id, note["title"], note["content"])
-            notes_created.append(note["title"])
+        # 4. Attach / Sync Notes
+        notes_created = self.sync_case_notes(case_id, case_payload.get("notes", []))
 
         # 5. Attach IOCs
         iocs_created = []
         for ioc in case_payload.get("iocs", []):
-            ok = self._add_ioc(case_id, ioc["value"], ioc["type"], ioc.get("description", ""))
-            if ok:
-                iocs_created.append(f"{ioc['type']}:{ioc['value']}")
+            val = ioc.get("value")
+            t = ioc.get("type", "other")
+            d = ioc.get("description", "")
+            if val and self._add_ioc(case_id, val, t, d):
+                iocs_created.append(f"{t}:{val}")
 
         # 6. Upload PDF Evidence
         evidence_uploaded = False
@@ -212,54 +211,165 @@ class IrisClient:
             "evidence_uploaded": evidence_uploaded
         }
 
-    def _add_note(self, case_id: int, title: str, content: str) -> bool:
-        """Adds a note to the specified case."""
-        endpoints = [
-            (f"{self.base_url}/api/v2/cases/{case_id}/notes", {"note_title": title, "note_content": content}),
-            (f"{self.base_url}/case/notes/add", {"cid": case_id, "note_title": title, "note_content": content})
-        ]
-        for ep, payload in endpoints:
-            try:
-                r = self.session.post(ep, headers=self.headers, json=payload, timeout=8)
-                if r.status_code in (200, 201):
-                    return True
-            except Exception:
-                pass
-        return False
+    # Standard DFIR-IRIS IOC Type IDs mapping
+    IOC_TYPE_MAP = {
+        "domain": 20,
+        "ip": 76,       # ip-any
+        "ip-any": 76,
+        "ip-dst": 77,
+        "ip-src": 79,
+        "url": 141,
+        "uri": 140,
+        "email": 22,
+        "email-src": 31,
+        "email-dst": 25,
+        "md5": 90,
+        "sha256": 113,
+        "other": 96
+    }
 
-    def _add_ioc(self, case_id: int, value: str, ioc_type: str, description: str) -> bool:
-        """Adds an IOC indicator to the case."""
-        # Normalize ioc_type
-        type_mapping = {
-            "domain": "domain",
-            "ip": "ip",
-            "url": "url",
-            "email": "email"
+    def sync_case_notes(self, case_id: int, notes: List[Dict[str, Any]]) -> List[str]:
+        """
+        Synchronizes notes with DFIR-IRIS for the case.
+        If a note with the given title already exists (e.g. created by case template), it updates it in place.
+        If a note does not exist, it adds it under the case's directory.
+        """
+        if not notes:
+            return []
+
+        synced = []
+        try:
+            # 1. Fetch existing directories and notes
+            r_dirs = self.session.get(
+                f"{self.base_url}/case/notes/directories/filter?cid={case_id}",
+                headers=self.headers,
+                timeout=10
+            )
+            dirs = r_dirs.json().get("data", []) if r_dirs.status_code == 200 else []
+
+            existing_notes_map: Dict[str, int] = {}
+            default_dir_id = None
+
+            if isinstance(dirs, list):
+                for d in dirs:
+                    if default_dir_id is None and d.get("id"):
+                        default_dir_id = d.get("id")
+                    for n in d.get("notes", []):
+                        if n.get("title") and n.get("id"):
+                            existing_notes_map[n["title"].strip().lower()] = n["id"]
+
+            # If no directory exists, create standard incident directory
+            if default_dir_id is None:
+                try:
+                    r_mkdir = self.session.post(
+                        f"{self.base_url}/case/notes/directories/add",
+                        headers=self.headers,
+                        json={"cid": case_id, "name": "Seguimiento del incidente"},
+                        timeout=8
+                    )
+                    if r_mkdir.status_code in (200, 201):
+                        default_dir_id = r_mkdir.json().get("data", {}).get("directory_id")
+                except Exception as err:
+                    logger.warning(f"Could not create note directory for case {case_id}: {err}")
+
+            # 2. Update existing notes or create new ones
+            for note in notes:
+                title = note.get("note_title") or note.get("title") or ""
+                content = note.get("note_content") or note.get("content") or ""
+                note_id = note.get("note_id") or note.get("id")
+
+                if not title:
+                    continue
+
+                norm_title = title.strip().lower()
+                target_note_id = note_id or existing_notes_map.get(norm_title)
+
+                if target_note_id:
+                    # Update existing note in IRIS
+                    up_payload = {
+                        "cid": case_id,
+                        "note_title": title,
+                        "note_content": content
+                    }
+                    r_up = self.session.post(
+                        f"{self.base_url}/case/notes/update/{target_note_id}?cid={case_id}",
+                        headers=self.headers,
+                        json=up_payload,
+                        timeout=10
+                    )
+                    if r_up.status_code in (200, 201):
+                        synced.append(title)
+                        logger.info(f"Updated note #{target_note_id} '{title}' in case #{case_id}")
+                    else:
+                        logger.warning(f"Failed to update note #{target_note_id} in case #{case_id}: {r_up.status_code} {r_up.text}")
+                else:
+                    # Create new note
+                    add_payload = {
+                        "cid": case_id,
+                        "directory_id": default_dir_id,
+                        "note_title": title,
+                        "note_content": content
+                    }
+                    r_add = self.session.post(
+                        f"{self.base_url}/case/notes/add?cid={case_id}",
+                        headers=self.headers,
+                        json=add_payload,
+                        timeout=10
+                    )
+                    if r_add.status_code in (200, 201):
+                        synced.append(title)
+                        logger.info(f"Created note '{title}' in case #{case_id}")
+                    else:
+                        logger.warning(f"Failed to create note '{title}' in case #{case_id}: {r_add.status_code} {r_add.text}")
+
+        except Exception as e:
+            logger.error(f"Error syncing notes for case #{case_id}: {e}")
+
+        return synced
+
+    def _add_ioc(self, case_id: int, value: str, ioc_type: str, description: str = "") -> bool:
+        """Adds an IOC indicator to the case in DFIR-IRIS."""
+        if not value:
+            return False
+
+        norm_type = (ioc_type or "other").strip().lower()
+        type_id = self.IOC_TYPE_MAP.get(norm_type)
+        if not type_id:
+            for k, v in self.IOC_TYPE_MAP.items():
+                if k in norm_type:
+                    type_id = v
+                    break
+        if not type_id:
+            type_id = 96  # other
+
+        payload = {
+            "ioc_type_id": type_id,
+            "ioc_tlp_id": 2,  # amber
+            "ioc_value": value.strip(),
+            "ioc_description": description or f"Indicador detectado ({norm_type})",
+            "ioc_tags": "abuse,automated",
+            "cid": case_id
         }
-        std_type = type_mapping.get(ioc_type.lower(), "other")
 
-        endpoints = [
-            (f"{self.base_url}/api/v2/cases/{case_id}/iocs", {
-                "ioc_value": value,
-                "ioc_type": std_type,
-                "ioc_description": description,
-                "ioc_tags": "abuse,automated"
-            }),
-            (f"{self.base_url}/case/ioc/add", {
-                "cid": case_id,
-                "ioc_value": value,
-                "ioc_type": std_type,
-                "ioc_description": description,
-                "ioc_tags": "abuse,automated"
-            })
-        ]
-        for ep, payload in endpoints:
-            try:
-                r = self.session.post(ep, headers=self.headers, json=payload, timeout=8)
-                if r.status_code in (200, 201):
+        try:
+            r = self.session.post(
+                f"{self.base_url}/case/ioc/add?cid={case_id}",
+                headers=self.headers,
+                json=payload,
+                timeout=10
+            )
+            if r.status_code in (200, 201):
+                res_data = r.json()
+                if res_data.get("status") == "success":
+                    logger.info(f"Added IOC '{value}' ({norm_type}) to case #{case_id}")
                     return True
-            except Exception:
-                pass
+                else:
+                    logger.warning(f"IRIS returned non-success adding IOC: {res_data}")
+            else:
+                logger.warning(f"Failed to add IOC to case #{case_id}: HTTP {r.status_code} {r.text}")
+        except Exception as e:
+            logger.error(f"Exception adding IOC to case #{case_id}: {e}")
+
         return False
 
     def get_datastore_folder_id(self, case_id: int, target_name: str = "Evidences") -> Optional[int]:
@@ -556,24 +666,43 @@ class IrisClient:
             # Fetch Evidences
             evidences = []
             try:
-                r_ev = self.session.get(f"{self.base_url}/case/evidences/list?cid={case_id}", headers=self.headers, timeout=5)
+                r_ev = self.session.get(f"{self.base_url}/case/evidences/list?cid={case_id}", headers=self.headers, timeout=8)
                 if r_ev.status_code == 200:
                     evidences = r_ev.json().get("data", {}).get("evidences", [])
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Error fetching evidences for case {case_id}: {e}")
 
             # Fetch IOCs
             iocs = []
             try:
-                r_ioc = self.session.get(f"{self.base_url}/case/ioc/list?cid={case_id}", headers=self.headers, timeout=5)
+                r_ioc = self.session.get(f"{self.base_url}/case/ioc/list?cid={case_id}", headers=self.headers, timeout=8)
                 if r_ioc.status_code == 200:
                     iocs = r_ioc.json().get("data", {}).get("ioc", [])
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Error fetching IOCs for case {case_id}: {e}")
+
+            # Fetch Notes
+            notes = []
+            try:
+                r_notes = self.session.get(f"{self.base_url}/case/notes/search?search_input=&cid={case_id}", headers=self.headers, timeout=10)
+                if r_notes.status_code == 200:
+                    notes_data = r_notes.json().get("data", [])
+                    if isinstance(notes_data, list):
+                        for n in notes_data:
+                            notes.append({
+                                "note_id": n.get("note_id"),
+                                "note_title": n.get("note_title") or "Sin título",
+                                "note_content": n.get("note_content") or "",
+                                "directory_id": n.get("directory_id"),
+                                "directory_name": n.get("directory", {}).get("name") if isinstance(n.get("directory"), dict) else ""
+                            })
+            except Exception as e:
+                logger.warning(f"Error fetching notes for case {case_id}: {e}")
 
             return {
                 "success": True,
                 "case": case_data,
+                "notes": notes,
                 "evidences": evidences,
                 "iocs": iocs
             }
@@ -606,9 +735,15 @@ class IrisClient:
 
     def update_case(self, case_id: int, updates: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Updates case details (name, description, state_id) in DFIR-IRIS.
+        Updates case details (name, description, state_id) and syncs notes in DFIR-IRIS.
         """
         try:
+            # 1. Sync notes if provided
+            synced_notes = []
+            if "notes" in updates and isinstance(updates["notes"], list):
+                synced_notes = self.sync_case_notes(case_id, updates["notes"])
+
+            # 2. Update case metadata
             post_data = {}
             if "case_name" in updates or "name" in updates:
                 post_data["case_name"] = updates.get("case_name") or updates.get("name")
@@ -619,15 +754,21 @@ class IrisClient:
             if "case_soc_id" in updates:
                 post_data["case_soc_id"] = updates["case_soc_id"]
 
-            r = self.session.post(
-                f"{self.base_url}/manage/cases/update/{case_id}",
-                headers=self.headers,
-                json=post_data,
-                timeout=8
-            )
-            if r.status_code in (200, 201):
-                return {"success": True, "message": f"Caso #{case_id} actualizado exitosamente", "data": r.json().get("data")}
-            return {"success": False, "error": f"Error actualizando caso: HTTP {r.status_code} {r.text}"}
+            if post_data:
+                r = self.session.post(
+                    f"{self.base_url}/manage/cases/update/{case_id}",
+                    headers=self.headers,
+                    json=post_data,
+                    timeout=10
+                )
+                if r.status_code not in (200, 201):
+                    return {"success": False, "error": f"Error actualizando metadatos del caso: HTTP {r.status_code} {r.text}"}
+
+            return {
+                "success": True,
+                "message": f"Caso #{case_id} actualizado exitosamente",
+                "notes_updated": synced_notes
+            }
         except Exception as e:
             return {"success": False, "error": str(e)}
 

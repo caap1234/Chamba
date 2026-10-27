@@ -1382,6 +1382,8 @@ async function openEditModal(caseId) {
   const descInput = document.getElementById("edit-case-desc");
   const descPreview = document.getElementById("edit-case-desc-preview");
   const toggleBtn = document.getElementById("btn-toggle-edit-desc");
+  const notesContainer = document.getElementById("edit-case-notes-container");
+  const iocsContainer = document.getElementById("edit-case-iocs-container");
 
   title.textContent = `Editar Caso #${caseId}`;
   caseIdInput.value = caseId;
@@ -1390,6 +1392,8 @@ async function openEditModal(caseId) {
   descPreview.classList.add("hidden");
   descInput.classList.remove("hidden");
   toggleBtn.textContent = "👁️ Previsualizar";
+  if (notesContainer) notesContainer.innerHTML = "<p style='color:var(--text-muted);font-size:0.84rem'>Cargando notas de DFIR-IRIS...</p>";
+  if (iocsContainer) iocsContainer.innerHTML = "<p style='color:var(--text-muted);font-size:0.84rem'>Cargando IOCs...</p>";
   modal.classList.remove("hidden");
 
   try {
@@ -1401,6 +1405,62 @@ async function openEditModal(caseId) {
     nameInput.value = c.name || "";
     stateSelect.value = String(c.state_id || 2);
     descInput.value = c.description || "";
+
+    // Render case notes
+    if (notesContainer) {
+      const notes = data.notes || [];
+      if (notes.length === 0) {
+        notesContainer.innerHTML = "<p style='color:var(--text-dim);font-size:0.82rem;font-style:italic'>No se encontraron notas en IRIS para este caso.</p>";
+      } else {
+        notesContainer.innerHTML = "";
+        notes.forEach((n, idx) => {
+          const card = document.createElement("div");
+          card.className = "note-item";
+          card.style.marginBottom = "8px";
+          card.innerHTML = `
+            <div class="note-header">
+              <span style="font-weight:600">${escapeHtml(n.note_title)}</span>
+              <div class="note-header-actions">
+                <button type="button" class="btn-note-toggle" id="btn-edit-note-toggle-${idx}" onclick="toggleEditModalNote(${idx})">
+                  👁️ Previsualizar
+                </button>
+              </div>
+            </div>
+            <textarea
+              class="editable-note-textarea edit-modal-note-textarea"
+              id="edit-modal-note-text-${idx}"
+              data-note-id="${n.note_id || ''}"
+              data-title="${escapeHtml(n.note_title)}"
+              rows="6"
+            >${escapeHtml(n.note_content)}</textarea>
+            <div class="rendered-note-view hidden" id="edit-modal-note-preview-${idx}"></div>
+          `;
+          notesContainer.appendChild(card);
+        });
+      }
+    }
+
+    // Render case IOCs
+    if (iocsContainer) {
+      const iocs = data.iocs || [];
+      if (iocs.length === 0) {
+        iocsContainer.innerHTML = "<p style='color:var(--text-dim);font-size:0.82rem;font-style:italic'>No hay indicadores IOCs registrados para este caso.</p>";
+      } else {
+        iocsContainer.innerHTML = "";
+        iocs.forEach(ioc => {
+          const row = document.createElement("div");
+          row.className = "ioc-row";
+          const t = (ioc.ioc_type || "other").toLowerCase();
+          const badgeClass = t.includes("domain") ? "domain" : (t.includes("ip") ? "ip" : (t.includes("url") ? "url" : (t.includes("mail") ? "email" : "other")));
+          row.innerHTML = `
+            <span class="ioc-badge ${badgeClass}">${escapeHtml((ioc.ioc_type || "IOC").toUpperCase())}</span>
+            <span class="ioc-val">${escapeHtml(ioc.ioc_value)}</span>
+            <span style="font-size:0.75rem;color:var(--text-dim)">${escapeHtml(ioc.tlp_name || 'TLP:AMBER')}</span>
+          `;
+          iocsContainer.appendChild(row);
+        });
+      }
+    }
   } catch (err) {
     alert("Error cargando caso: " + err.message);
     closeEditModal();
@@ -1431,6 +1491,27 @@ function toggleEditModalDesc() {
   }
 }
 
+function toggleEditModalNote(idx) {
+  const textarea = document.getElementById(`edit-modal-note-text-${idx}`);
+  const previewDiv = document.getElementById(`edit-modal-note-preview-${idx}`);
+  const toggleBtn = document.getElementById(`btn-edit-note-toggle-${idx}`);
+
+  if (!textarea || !previewDiv) return;
+  const isPreview = !previewDiv.classList.contains("hidden");
+
+  if (isPreview) {
+    previewDiv.classList.add("hidden");
+    textarea.classList.remove("hidden");
+    toggleBtn.textContent = "👁️ Previsualizar";
+    textarea.focus();
+  } else {
+    previewDiv.innerHTML = parseMarkdownSafe(textarea.value);
+    textarea.classList.add("hidden");
+    previewDiv.classList.remove("hidden");
+    toggleBtn.textContent = "✏️ Editar";
+  }
+}
+
 async function saveCaseEdits() {
   const caseId = document.getElementById("edit-case-id").value;
   const name = document.getElementById("edit-case-name").value.trim();
@@ -1438,6 +1519,16 @@ async function saveCaseEdits() {
   const desc = document.getElementById("edit-case-desc").value.trim();
   const statusElem = document.getElementById("edit-modal-status");
   const btnSave = document.getElementById("btn-save-case");
+
+  // Gather edited notes
+  const editedNotes = [];
+  document.querySelectorAll(".edit-modal-note-textarea").forEach(ta => {
+    editedNotes.push({
+      note_id: ta.dataset.noteId ? parseInt(ta.dataset.noteId, 10) : null,
+      title: ta.dataset.title,
+      content: ta.value
+    });
+  });
 
   btnSave.disabled = true;
   statusElem.textContent = "Guardando en DFIR-IRIS...";
@@ -1449,7 +1540,8 @@ async function saveCaseEdits() {
       body: JSON.stringify({
         case_name: name,
         case_description: desc,
-        state_id: stateId
+        state_id: stateId,
+        notes: editedNotes
       })
     });
 

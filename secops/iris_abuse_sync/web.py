@@ -320,6 +320,7 @@ class UpdateCaseRequest(BaseModel):
     case_description: Optional[str] = None
     state_id: Optional[int] = None
     case_soc_id: Optional[str] = None
+    notes: Optional[List[Dict[str, Any]]] = None
 
 
 class ExportPdfRequest(BaseModel):

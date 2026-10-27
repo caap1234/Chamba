@@ -533,6 +533,24 @@
             <textarea id="edit-case-desc" class="form-textarea-lg" rows="8"></textarea>
             <div id="edit-case-desc-preview" class="rendered-markdown-view hidden"></div>
           </div>
+
+          <!-- Notes Editor Section in Edit Modal -->
+          <div class="form-group">
+            <div class="summary-toolbar">
+              <label class="form-section-title">📝 Notas del Caso en DFIR-IRIS:</label>
+            </div>
+            <div id="edit-case-notes-container" class="edit-notes-list">
+              <!-- Dynamically populated with case notes from IRIS -->
+            </div>
+          </div>
+
+          <!-- IOCs Section in Edit Modal -->
+          <div class="form-group">
+            <label class="form-section-title">🎯 Indicadores IOCs Registrados en IRIS:</label>
+            <div id="edit-case-iocs-container" class="edit-iocs-list">
+              <!-- Dynamically populated -->
+            </div>
+          </div>
         </div>
 
         <div class="modal-footer">

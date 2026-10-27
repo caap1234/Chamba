@@ -203,7 +203,7 @@ class CaseBuilder:
             "classification_confidence": classification.get("confidence", 1.0),
             "custom_attributes": custom_attributes,
             "notes": notes,
-            "iocs": overrides.get("iocs") or parsed.get("iocs", []),
+            "iocs": overrides.get("selected_iocs") or overrides.get("iocs") or parsed.get("iocs", []),
             "metadata": {
                 "ticket_id": report_ticket,
                 "client_ticket": client_ticket,
