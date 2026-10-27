@@ -591,18 +591,36 @@ class IrisClient:
             logger.warning(f"Error fetching case datastore images: {e}")
         return images
 
-    def list_cases(self, filter_state: str = "open", limit: int = 100) -> Dict[str, Any]:
+    def list_cases(self, filter_state: str = "open", limit: int = 200) -> Dict[str, Any]:
         """
         Lists cases from DFIR-IRIS, normalized with customer names, badges and state info.
         filter_state can be 'open' (excludes closed cases) or 'all'.
         """
         try:
-            r = self.session.get(f"{self.base_url}/manage/cases/filter", headers=self.headers, timeout=8)
+            # DFIR-IRIS defaults to per_page=10 if not specified. Pass per_page to fetch all cases.
+            page_size = max(limit or 200, 100)
+            r = self.session.get(f"{self.base_url}/manage/cases/filter?per_page={page_size}", headers=self.headers, timeout=12)
             if r.status_code != 200:
                 return {"success": False, "error": f"Error fetching cases: HTTP {r.status_code}", "cases": []}
 
             data = r.json()
             raw_cases = data.get("data", {}).get("cases", []) if isinstance(data.get("data"), dict) else []
+
+            # Multi-page pagination support if total exceeds page_size
+            last_page = data.get("data", {}).get("last_page", 1)
+            if last_page and last_page > 1:
+                for p in range(2, last_page + 1):
+                    try:
+                        r_next = self.session.get(
+                            f"{self.base_url}/manage/cases/filter?page={p}&per_page={page_size}",
+                            headers=self.headers,
+                            timeout=10
+                        )
+                        if r_next.status_code == 200:
+                            next_cases = r_next.json().get("data", {}).get("cases", [])
+                            raw_cases.extend(next_cases)
+                    except Exception as err:
+                        logger.warning(f"Error fetching page {p} of cases: {err}")
 
             normalized = []
             for c in raw_cases:
