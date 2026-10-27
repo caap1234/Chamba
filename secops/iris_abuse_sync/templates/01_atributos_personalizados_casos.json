@@ -1,0 +1,24 @@
+{
+  "01 Identificación": {
+    "Ticket de abuso": {
+      "type": "input_string",
+      "mandatory": false,
+      "value": ""
+    },
+    "Dominio o activo reportado": {
+      "type": "input_string",
+      "mandatory": false,
+      "value": ""
+    },
+    "IP reportada": {
+      "type": "input_string",
+      "mandatory": false,
+      "value": ""
+    },
+    "Ticket del titular": {
+      "type": "input_string",
+      "mandatory": false,
+      "value": ""
+    }
+  }
+}

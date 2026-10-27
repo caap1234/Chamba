@@ -1,0 +1,33 @@
+# Environment variables
+.env
+.env.local
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Runtime & Scratch
+scratch/*
+!scratch/.gitkeep
+scratch/evidences/
+inbox/*
+!inbox/.gitkeep
+processed/*
+!processed/.gitkeep
+errors/*
+!errors/.gitkeep
+
+# Service PID and logs
+.service.pid
+*.log
+web.log
+
+# OS metadata
+.DS_Store
+Thumbs.db

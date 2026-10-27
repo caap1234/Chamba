@@ -2,3 +2,12 @@ Tarea/
 __pycache__/
 venv/
 *.pyc
+.env
+.env.local
+!.env.example
+*.log
+.DS_Store
+secops/iris_abuse_sync/scratch/*
+!secops/iris_abuse_sync/scratch/.gitkeep
+secops/iris_abuse_sync/.service.pid
+

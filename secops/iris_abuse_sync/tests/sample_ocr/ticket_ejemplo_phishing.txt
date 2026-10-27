@@ -1,0 +1,49 @@
+Ticket 999001 | URL: https://helpdesk.neubox.com/#ticket/zoom/999001
+TIPIFICACIÓN DEL TICKET
+Tipo -
+Group 14 Soporte 2do Nivel
+Owner Christian Aceves
+State new
+Pending till at 08:00
+Priority 2 normal
+antiphishing-team@seguridad-ficticia.org via abuse — 10/26/2026 8:00 pm — Mensaje público
+Estimado equipo de Seguridad y Abuso de Neubox,
+
+Les escribimos para reportar una campaña activa de phishing alojada en su infraestructura de red:
+Dominio fraudulento: portal-acceso-bancario-falso.com
+Dirección IP del servidor: 198.51.100.25
+Servidores de nombres (DNS): ns143.neubox.net, ns144.neubox.net
+
+URL maliciosa específica:
+https://portal-acceso-bancario-falso.com/login/banca-en-linea.php
+
+Detalle del incidente:
+El sitio web imita de manera idéntica la interfaz de inicio de sesión de un portal bancario con el objetivo de sustraer credenciales bancarias y códigos de autenticación de dos factores (2FA) de usuarios desprevenidos.
+
+Agradecemos su pronta intervención para suspender este servicio de acuerdo con sus Políticas de Uso Aceptable (AUP).
+
+Atentamente,
+Equipo de Respuesta a Incidentes (CSIRT Ficticio)
+CSIRT Global / Abuse Reporting
+📎 captura_sitio_phishing.png
+
+10/26/2026, 8:05 pm Ticket 999001
+Nlab Bot — 10/26/2026 8:05 pm — Nota interna
+🔍 Análisis Bastion — 1 dominio(s) detectado(s)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[◉"] portal-acceso-bancario-falso.com: https://shots.nlab.mx/shots/2026-10-26/portal-acceso-bancario-falso.com.webp
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DOMAIN: portal-acceso-bancario-falso.com
+Executed: Sun Oct 26 20:05:00 2026
+Version: v6.2 (2026)
+----------------------------------------
+DNS & WHOIS
+A: 198.51.100.25
+NS: ns143.neubox.net, ns144.neubox.net
+MX: mail.portal-acceso-bancario-falso.com
+Server: cPanel WebHost / svde999.neubox.net
+Client ID: NBX-884920
+Service ID: SRV-10293
+Affected Asset: portal-acceso-bancario-falso.com
+Status: ACTIVE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

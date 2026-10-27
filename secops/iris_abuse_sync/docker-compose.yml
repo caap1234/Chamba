@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  iris-abuse-sync:
+    build: .
+    container_name: iris-abuse-sync
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - IRIS_URL=${IRIS_URL:-https://iris.tokyo-03.com}
+      - IRIS_API_KEY=${IRIS_API_KEY}
+      - IRIS_CUSTOMER_ID=${IRIS_CUSTOMER_ID:-1}
+      - IRIS_VERIFY_SSL=${IRIS_VERIFY_SSL:-false}
+      - WEB_HOST=0.0.0.0
+      - WEB_PORT=8080
+    volumes:
+      - ./inbox:/app/inbox
+      - ./processed:/app/processed
+      - ./errors:/app/errors
+      - ./templates:/app/templates
+      - ./.env:/app/.env:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

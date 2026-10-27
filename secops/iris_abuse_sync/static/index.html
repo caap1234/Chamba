@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DFIR-IRIS Abuse Sync | SOC Neubox Automation</title>
+  <meta name="description" content="Automatización inteligente para crear casos en DFIR-IRIS a partir de tickets de abuso en PDF utilizando SOC Abuse Lite v2.0">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/marked.min.js"></script>
+</head>
+<body>
+  <div class="background-glows">
+    <div class="glow glow-1"></div>
+    <div class="glow glow-2"></div>
+    <div class="glow glow-3"></div>
+  </div>
+
+  <div class="app-container">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="header-left">
+        <div class="logo-badge">
+          <svg class="shield-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          </svg>
+        </div>
+        <div>
+          <div class="title-row">
+            <h1>DFIR-IRIS Abuse Sync</h1>
+            <span class="version-tag">SOC Lite v2.0</span>
+          </div>
+          <p class="subtitle">Automatización de tickets Helpdesk, gestión de casos DFIR-IRIS e informes PDF</p>
+        </div>
+      </div>
+
+      <div class="header-status">
+        <!-- Ollama Selector -->
+        <div class="llm-pill">
+          <span class="llm-icon">🦙</span>
+          <span class="pill-label">Ollama:</span>
+          <select id="ollama-model-select" class="ollama-select" onchange="onOllamaModelChange()">
+            <option value="">Cargando modelos...</option>
+          </select>
+        </div>
+
+        <div id="iris-status-badge" class="status-indicator checking">
+          <span class="pulse-dot"></span>
+          <span id="iris-status-text">Conectando a DFIR-IRIS...</span>
+        </div>
+        <div class="server-pill" id="iris-url-pill">
+          <span class="pill-label">Instancia:</span>
+          <span class="pill-val" id="iris-url-val">iris.tokyo-03.com</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Top View Navigation Tabs -->
+    <nav class="main-nav-bar">
+      <button type="button" class="nav-tab active" id="tab-nav-ingest" onclick="switchMainView('ingest')">
+        <span class="nav-icon">⚡</span>
+        <span class="nav-text">Ingesta & Creación de Casos</span>
+      </button>
+      <button type="button" class="nav-tab" id="tab-nav-cases" onclick="switchMainView('cases')">
+        <span class="nav-icon">📂</span>
+        <span class="nav-text">Casos DFIR-IRIS</span>
+        <span class="nav-counter-badge" id="open-cases-badge">...</span>
+      </button>
+    </nav>
+
+    <!-- VIEW 1: INGEST & CREATE CASES -->
+    <div id="view-ingest" class="main-view active">
+      <main class="main-content">
+        <!-- Left Column: Upload & Extracted Overview -->
+        <section class="panel upload-panel">
+          <div class="panel-header">
+            <h2>1. Carga del Ticket de Abuso</h2>
+            <span class="hint-tag">Soporta PDF o TXT</span>
+          </div>
+
+          <!-- Dropzone -->
+          <div class="dropzone" id="dropzone">
+            <input type="file" id="file-input" accept=".pdf,.txt" class="file-input-hidden">
+            <div class="dropzone-content">
+              <div class="upload-icon-circle">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                  <polyline points="17 8 12 3 7 8"/>
+                  <line x1="12" y1="3" x2="12" y2="15"/>
+                </svg>
+              </div>
+              <p class="dropzone-title">Arrastra el archivo PDF del ticket aquí</p>
+              <p class="dropzone-sub">o haz clic para seleccionar desde tu equipo</p>
+              <div class="sample-actions">
+                <span class="sample-hint">O prueba con un ticket de muestra:</span>
+                <div class="sample-chips">
+                  <button type="button" class="btn-chip" onclick="loadSample('ticket_ejemplo_phishing.txt')">🎣 999001 (Phishing Prueba - NBX)</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Loading spinner -->
+          <div id="parse-loading" class="loading-state hidden">
+            <div class="spinner"></div>
+            <p>Extrayendo metadatos y aplicando análisis heurístico + Ollama...</p>
+          </div>
+
+          <!-- Extracted Overview Card -->
+          <div id="overview-card" class="overview-card hidden">
+            <div class="overview-header">
+              <div>
+                <span class="ticket-badge" id="lbl-ticket-id">Ticket #---</span>
+                <a href="#" target="_blank" id="lnk-ticket" class="ticket-link">Ver en Helpdesk ↗</a>
+              </div>
+              <div class="priority-badge" id="lbl-priority">Normal</div>
+            </div>
+
+            <div class="meta-grid">
+              <div class="meta-item">
+                <span class="meta-label">Activo Reportado</span>
+                <span class="meta-value highlight" id="lbl-asset">--</span>
+              </div>
+              <div class="meta-item">
+                <span class="meta-label">Reportante</span>
+                <span class="meta-value" id="lbl-reporter">--</span>
+              </div>
+              <div class="meta-item">
+                <span class="meta-label">Servidor(es) Neubox</span>
+                <span class="meta-value server" id="lbl-server">--</span>
+              </div>
+              <div class="meta-item">
+                <span class="meta-label">IP Primaria</span>
+                <span class="meta-value mono" id="lbl-ip">--</span>
+              </div>
+              <div class="meta-item">
+                <span class="meta-label">Cuenta Autenticada</span>
+                <span class="meta-value mono" id="lbl-auth">N/A</span>
+              </div>
+              <div class="meta-item">
+                <span class="meta-label">Ticket Titular (HP)</span>
+                <span class="meta-value highlight" id="lbl-client-ticket">N/A</span>
+              </div>
+            </div>
+
+            <div class="summary-box">
+              <span class="meta-label">Resumen de la denuncia:</span>
+              <p id="lbl-summary">--</p>
+            </div>
+          </div>
+        </section>
+
+        <!-- Right Column: Case Configuration & Action -->
+        <section class="panel case-panel">
+          <div class="panel-header">
+            <h2>2. Parámetros del Caso & Previsualización</h2>
+            <div class="header-tools">
+              <span class="confidence-badge" id="confidence-badge">Esperando ticket</span>
+            </div>
+          </div>
+
+          <div id="case-empty-state" class="empty-state">
+            <div class="empty-icon">📂</div>
+            <p>Carga o selecciona un ticket PDF a la izquierda para previsualizar, editar y generar el caso en DFIR-IRIS.</p>
+          </div>
+
+          <div id="case-active-state" class="case-active-state hidden">
+            <!-- Customer and Template Bar -->
+            <div class="top-controls-grid">
+              <!-- Customer Selector (Neubox vs Hospedando) -->
+              <div class="control-box">
+                <label class="control-label">Cliente / Organización:</label>
+                <div class="customer-toggle-group">
+                  <button type="button" class="btn-cust active" id="btn-cust-nbx" onclick="setCustomer('neubox')">
+                    <span class="cust-code">NBX</span>
+                    <span>Neubox (ID 2)</span>
+                  </button>
+                  <button type="button" class="btn-cust" id="btn-cust-hp" onclick="setCustomer('hospedando')">
+                    <span class="cust-code">HP</span>
+                    <span>Hospedando (ID 3)</span>
+                  </button>
+                </div>
+              </div>
+
+              <!-- Template Selector -->
+              <div class="control-box">
+                <label class="control-label" for="template-select">Template SOC Lite v2.0:</label>
+                <select id="template-select" class="form-select" onchange="onTemplateChange()">
+                  <!-- Populated dynamically -->
+                </select>
+              </div>
+            </div>
+
+            <!-- Classification reason alert -->
+            <div class="reasons-alert" id="reasons-alert">
+              <span class="alert-icon">💡</span>
+              <span id="reasons-text">Criterios de clasificación detectados</span>
+            </div>
+
+            <!-- Quick Parameters Inputs (Editable manual parameters) -->
+            <div class="manual-params-card">
+              <div class="params-header">
+                <span class="params-title">⚙️ Parámetros del Caso (Completar / Modificar si faltan)</span>
+                <button type="button" class="btn-subtle" onclick="recalculateFields()">Recalcular Título y Notas ⟳</button>
+              </div>
+              <div class="params-grid">
+                <div class="param-field">
+                  <label for="param-report-ticket">Ticket de Reporte / Abuso:</label>
+                  <input type="text" id="param-report-ticket" class="form-input-sm" oninput="onParamChange()">
+                </div>
+                <div class="param-field">
+                  <label for="param-client-ticket">Ticket Titular (Cliente):</label>
+                  <input type="text" id="param-client-ticket" class="form-input-sm" placeholder="ej. 247629" oninput="onParamChange()">
+                </div>
+                <div class="param-field">
+                  <label for="param-client-id">ID de Cliente:</label>
+                  <input type="text" id="param-client-id" class="form-input-sm" placeholder="ej. 50269" oninput="onParamChange()">
+                </div>
+                <div class="param-field">
+                  <label for="param-service-id">ID de Servicio:</label>
+                  <input type="text" id="param-service-id" class="form-input-sm" placeholder="ej. 14203" oninput="onParamChange()">
+                </div>
+                <div class="param-field">
+                  <label for="param-asset">Activo / Dominio:</label>
+                  <input type="text" id="param-asset" class="form-input-sm" oninput="onParamChange()">
+                </div>
+                <div class="param-field">
+                  <label for="param-server">Servidor Neubox:</label>
+                  <input type="text" id="param-server" class="form-input-sm" placeholder="ej. svgp261..." oninput="onParamChange()">
+                </div>
+              </div>
+            </div>
+
+            <!-- Case Name Input -->
+            <div class="form-group">
+              <label for="case-name-input">Nombre del Caso en IRIS (Formato Oficial):</label>
+              <input type="text" id="case-name-input" class="form-input">
+            </div>
+
+            <!-- Tabs -->
+            <div class="tabs-nav">
+              <button type="button" class="tab-btn active" onclick="switchTab('notes')">📝 Notas Editables (3)</button>
+              <button type="button" class="tab-btn" onclick="switchTab('iocs')">🎯 Indicadores IOCs (<span id="iocs-count">0</span>)</button>
+              <button type="button" class="tab-btn" onclick="switchTab('summary')">📋 Resumen del Caso</button>
+              <button type="button" class="tab-btn" onclick="switchTab('attributes')">🏷️ Atributos de Identificación</button>
+              <button type="button" class="tab-btn" onclick="switchTab('evidences')">🖼️ Evidencias / Datastore (<span id="evidences-count">0</span>)</button>
+              <button type="button" class="tab-btn" onclick="switchTab('raw')">📄 Texto Raw</button>
+            </div>
+
+            <!-- Tab Contents -->
+            <div class="tab-panes">
+              <!-- Notes Pane (Editable textareas + Rendered Markdown Toggle) -->
+              <div id="pane-notes" class="tab-pane active">
+                <div class="notes-toolbar">
+                  <p class="pane-hint">Edita el Markdown directamente o previsualiza cómo se interpreta con formato visual:</p>
+                  <button type="button" class="btn-subtle" id="btn-toggle-all-notes" onclick="toggleAllNotesMode()">👁️ Previsualizar Todas</button>
+                </div>
+                <div class="notes-accordion" id="notes-accordion">
+                  <!-- Dynamically rendered editable notes with preview toggle -->
+                </div>
+              </div>
+
+              <!-- IOCs Pane (Checkboxes, Delete button, Add manual IOC) -->
+              <div id="pane-iocs" class="tab-pane">
+                <div class="iocs-toolbar">
+                  <p class="pane-hint">Marca o desmarca IOCs para incluirlos, o elimina falsos positivos:</p>
+                  <button type="button" class="btn-subtle" onclick="promptAddIoc()">+ Agregar IOC Manual</button>
+                </div>
+                <div class="iocs-list" id="iocs-list">
+                  <!-- Checkboxes and delete buttons for IOCs -->
+                </div>
+              </div>
+
+              <!-- Summary Pane with Live Markdown Preview Toggle -->
+              <div id="pane-summary" class="tab-pane">
+                <div class="summary-toolbar">
+                  <label class="control-label" for="case-desc-input">Resumen Ejecutivo del Caso (Markdown):</label>
+                  <button type="button" class="btn-subtle" id="btn-toggle-desc" onclick="toggleDescMode()">👁️ Previsualizar Markdown</button>
+                </div>
+                <textarea id="case-desc-input" class="form-textarea-lg" rows="8"></textarea>
+                <div id="case-desc-preview" class="rendered-markdown-view hidden"></div>
+              </div>
+
+              <!-- Attributes Pane (Editable) -->
+              <div id="pane-attributes" class="tab-pane">
+                <div class="attributes-toolbar">
+                  <p class="pane-hint">Los atributos se guardan en los campos personalizados de IRIS. Modifica cualquier valor directamente:</p>
+                  <button type="button" class="btn-subtle" onclick="promptAddCustomAttribute()">+ Agregar Atributo</button>
+                </div>
+                <div class="attributes-preview" id="attributes-preview">
+                  <!-- Custom attributes editable inputs -->
+                </div>
+              </div>
+
+              <!-- Evidences Pane (Datastore attachments) -->
+              <div id="pane-evidences" class="tab-pane">
+                <div class="evidences-toolbar">
+                  <p class="pane-hint">Las capturas se guardarán en el <strong>Datastore de IRIS</strong> (con cálculo automático de SHA-256) al crear el caso:</p>
+                  <input type="file" id="ticket-evidence-input" accept="image/png,image/jpeg,image/webp,image/gif,application/pdf" multiple style="display:none" onchange="handleTicketEvidenceUpload(event)">
+                  <button type="button" class="btn-subtle" onclick="document.getElementById('ticket-evidence-input').click()">+ Seleccionar Archivos</button>
+                </div>
+                <div id="evidences-dropzone" class="evidences-dropzone" onclick="document.getElementById('ticket-evidence-input').click()">
+                  <div class="dropzone-inner">
+                    <span class="dropzone-icon">🖼️</span>
+                    <p class="dropzone-title">Arrastra aquí capturas de pantalla o haz clic para subir</p>
+                    <p class="dropzone-desc">PNG, JPG, WebP o PDF — Se guardarán en el Datastore de DFIR-IRIS</p>
+                  </div>
+                </div>
+                <div id="evidences-grid" class="evidences-grid">
+                  <!-- Rendered evidence cards with hashes and preview -->
+                </div>
+              </div>
+
+              <!-- Raw Pane -->
+              <div id="pane-raw" class="tab-pane">
+                <pre id="raw-text-view" class="raw-pre"></pre>
+              </div>
+            </div>
+
+            <!-- Actions Footer -->
+            <div class="actions-footer">
+              <button type="button" class="btn btn-secondary" id="btn-dry-run" onclick="submitCase(true)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
+                  <polygon points="5 3 19 12 5 21 5 3"/>
+                </svg>
+                Simular Creación (Dry-Run)
+              </button>
+              <button type="button" class="btn btn-primary" id="btn-create-real" onclick="submitCase(false)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                  <polyline points="14 2 14 8 20 8"/>
+                  <line x1="12" y1="18" x2="12" y2="12"/>
+                  <line x1="9" y1="15" x2="15" y2="15"/>
+                </svg>
+                Crear Caso en DFIR-IRIS
+              </button>
+            </div>
+
+            <!-- Result banner -->
+            <div id="result-banner" class="result-banner hidden"></div>
+          </div>
+        </section>
+      </main>
+
+      <!-- Session History -->
+      <section class="panel history-panel">
+        <div class="panel-header">
+          <h2>Casos Creados en esta Sesión</h2>
+          <span class="hint-tag" id="history-count">0 casos</span>
+        </div>
+        <div class="table-container">
+          <table class="history-table">
+            <thead>
+              <tr>
+                <th>Organización</th>
+                <th>Ticket SOC</th>
+                <th>Caso IRIS</th>
+                <th>Template</th>
+                <th>Modo</th>
+                <th>Enlace Directo</th>
+              </tr>
+            </thead>
+            <tbody id="history-tbody">
+              <tr class="empty-row"><td colspan="6">No se han creado casos en esta sesión aún.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <!-- VIEW 2: DFIR-IRIS CASES MANAGEMENT & REPORTS -->
+    <div id="view-cases" class="main-view hidden">
+      <section class="panel cases-management-panel">
+        <div class="panel-header cases-mgmt-header">
+          <div>
+            <h2>Casos en Servidor DFIR-IRIS</h2>
+            <p class="subtitle">Consulta casos en vivo desde <code>iris.tokyo-03.com</code>, edítalos, ciérralos o genera informes en PDF</p>
+          </div>
+          <div class="cases-mgmt-controls">
+            <!-- Filter by State -->
+            <div class="segmented-control">
+              <button type="button" class="btn-segment active" id="btn-filter-open" onclick="filterCasesState('open')">Solo Abiertos</button>
+              <button type="button" class="btn-segment" id="btn-filter-all" onclick="filterCasesState('all')">Todos los Casos</button>
+            </div>
+
+            <!-- Filter by Customer -->
+            <div class="customer-filter-chips">
+              <button type="button" class="btn-chip active" id="chip-cust-all" onclick="filterCasesCustomer('all')">Todos</button>
+              <button type="button" class="btn-chip" id="chip-cust-nbx" onclick="filterCasesCustomer('neubox')">Neubox (NBX)</button>
+              <button type="button" class="btn-chip" id="chip-cust-hp" onclick="filterCasesCustomer('hospedando')">Hospedando (HP)</button>
+            </div>
+
+            <!-- Search box -->
+            <div class="search-input-wrapper">
+              <input type="text" id="cases-search-input" class="cases-search-input" placeholder="🔍 Buscar dominio, ticket o ID..." oninput="onCasesSearch()">
+            </div>
+
+            <!-- Refresh button -->
+            <button type="button" class="btn-subtle" onclick="loadIrisCases(true)">
+              <span>⟳ Actualizar</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Cases Table -->
+        <div class="table-container cases-table-container">
+          <div id="cases-loading" class="loading-state hidden">
+            <div class="spinner"></div>
+            <p>Cargando casos desde DFIR-IRIS...</p>
+          </div>
+
+          <table class="history-table cases-table" id="iris-cases-table">
+            <thead>
+              <tr>
+                <th style="width:70px">ID</th>
+                <th style="width:110px">Org</th>
+                <th>Nombre del Caso en IRIS</th>
+                <th style="width:140px">Estado</th>
+                <th style="width:110px">Apertura</th>
+                <th style="width:310px;text-align:right">Acciones</th>
+              </tr>
+            </thead>
+            <tbody id="iris-cases-tbody">
+              <!-- Dynamically populated from /api/cases -->
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <!-- MODAL: REPORT GENERATOR & PDF EXPORT -->
+    <div id="modal-report" class="modal-backdrop hidden">
+      <div class="modal-card modal-card-lg">
+        <div class="modal-header">
+          <div>
+            <div class="modal-title-row">
+              <span class="report-icon">📄</span>
+              <h3 id="modal-report-title">Informe de Incidente — Caso #---</h3>
+            </div>
+            <p class="modal-subtitle" id="modal-report-subtitle">Generado con plantilla SOC Abuse Lite v2.0</p>
+          </div>
+          <button type="button" class="btn-close-modal" onclick="closeReportModal()">&times;</button>
+        </div>
+
+        <div class="modal-toolbar">
+          <div class="segmented-control">
+            <button type="button" class="btn-segment active" id="btn-report-view-preview" onclick="switchReportTab('preview')">👁️ Vista Ejecutiva (HTML / PDF)</button>
+            <button type="button" class="btn-segment" id="btn-report-view-edit" onclick="switchReportTab('edit')">📝 Editar Markdown</button>
+          </div>
+
+          <div class="modal-toolbar-actions">
+            <input type="file" id="report-img-input" accept="image/png,image/jpeg,image/webp,image/gif" multiple style="display:none" onchange="uploadReportImage(event)">
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-attach-report-img" onclick="document.getElementById('report-img-input').click()" title="Adjuntar captura al Datastore de IRIS y pegarla en el reporte">
+              🖼️ Adjuntar Imagen
+            </button>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="copyReportMarkdown()">
+              📋 Copiar MD
+            </button>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="printReportDocument()">
+              🖨️ Imprimir
+            </button>
+            <button type="button" class="btn btn-primary btn-sm" id="btn-download-pdf" onclick="downloadReportPdf()">
+              📥 Descargar PDF
+            </button>
+          </div>
+        </div>
+
+        <div class="modal-body report-modal-body">
+          <!-- Preview Pane (Styled executive paper) -->
+          <div id="report-pane-preview" class="report-pane active">
+            <div id="report-rendered-paper" class="report-paper">
+              <!-- Rendered Executive HTML report -->
+            </div>
+          </div>
+
+          <!-- Edit Pane (Markdown textarea) -->
+          <div id="report-pane-edit" class="report-pane">
+            <p class="pane-hint">Puedes modificar las secciones o pegar capturas directamente con <kbd>Ctrl+V</kbd> / <kbd>Cmd+V</kbd> para guardarlas en el Datastore de IRIS:</p>
+            <textarea id="report-markdown-editor" class="report-markdown-editor" rows="18" oninput="onReportMarkdownEdit()"></textarea>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <span class="report-status-hint" id="report-modal-status">Listo para exportar</span>
+          <button type="button" class="btn btn-secondary" onclick="closeReportModal()">Cerrar</button>
+          <button type="button" class="btn btn-primary" onclick="downloadReportPdf()">
+            📥 Exportar a PDF
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- MODAL: EDIT CASE IN IRIS -->
+    <div id="modal-edit-case" class="modal-backdrop hidden">
+      <div class="modal-card">
+        <div class="modal-header">
+          <div>
+            <h3 id="modal-edit-title">Editar Caso #---</h3>
+            <p class="modal-subtitle">Modifica el título, estado o resumen directamente en DFIR-IRIS</p>
+          </div>
+          <button type="button" class="btn-close-modal" onclick="closeEditModal()">&times;</button>
+        </div>
+
+        <div class="modal-body">
+          <input type="hidden" id="edit-case-id">
+
+          <div class="form-group">
+            <label for="edit-case-name">Nombre del Caso:</label>
+            <input type="text" id="edit-case-name" class="form-input">
+          </div>
+
+          <div class="form-group">
+            <label for="edit-case-state">Estado en IRIS:</label>
+            <select id="edit-case-state" class="form-select">
+              <option value="2">In progress (En investigación)</option>
+              <option value="3">Open (Abierto)</option>
+              <option value="4">Containment (Contención)</option>
+              <option value="5">Eradication (Erradicación)</option>
+              <option value="6">Recovery (Recuperación)</option>
+              <option value="7">Post-Incident (Post-incidente)</option>
+              <option value="8">Reporting (Generación de Reporte)</option>
+              <option value="9">Closed (Cerrado)</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <div class="summary-toolbar">
+              <label for="edit-case-desc">Resumen del Caso (Markdown):</label>
+              <button type="button" class="btn-subtle" id="btn-toggle-edit-desc" onclick="toggleEditModalDesc()">👁️ Previsualizar</button>
+            </div>
+            <textarea id="edit-case-desc" class="form-textarea-lg" rows="8"></textarea>
+            <div id="edit-case-desc-preview" class="rendered-markdown-view hidden"></div>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <div id="edit-modal-status" class="edit-status"></div>
+          <button type="button" class="btn btn-secondary" onclick="closeEditModal()">Cancelar</button>
+          <button type="button" class="btn btn-primary" id="btn-save-case" onclick="saveCaseEdits()">
+            Guardar Cambios en IRIS
+          </button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
