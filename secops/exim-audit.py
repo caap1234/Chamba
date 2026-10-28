@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Auditoría de Exim y Dovecot para DirectAdmin/AlmaLinux. Solo lectura.
 
+Compatible con Python 3.4+ (sin f-strings ni subíndices de Match).
 Ejecución directa:
   python3 <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/secops/exim-audit.py)
   python3 <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/secops/exim-audit.py) --days 3 --top 30
@@ -48,7 +49,7 @@ def files_for(stems, since=None):
         for name in glob.glob(stem + '*'):
             if os.path.isfile(name) and (
                 name == stem
-                or re.fullmatch(re.escape(stem) + r'(?:\.\d+|[-.]\d{8}|-\d{4}-\d\d-\d\d)(?:\.gz)?', name)
+                or re.search(r'^' + re.escape(stem) + r'(?:\.\d+|[-.]\d{8}|-\d{4}-\d\d-\d\d)(?:\.gz)?\Z', name)
             ):
                 if cutoff is not None:
                     try:
@@ -87,15 +88,15 @@ def time_syslog(line, now):
     m = ISOLOG.match(line)
     if m:
         try:
-            return dt.datetime.strptime(m[1].replace('T', ' '), '%Y-%m-%d %H:%M:%S')
+            return dt.datetime.strptime(m.group(1).replace('T', ' '), '%Y-%m-%d %H:%M:%S')
         except ValueError:
             return None
     m = SYSLOG.match(line)
-    if not m or m[1] not in MONTHS:
+    if not m or m.group(1) not in MONTHS:
         return None
-    month, day, clock = MONTHS[m[1]], int(m[2]), m[3]
+    month, day, clock = MONTHS[m.group(1)], int(m.group(2)), m.group(3)
     try:
-        candidate = dt.datetime.strptime(f'{now.year}-{month:02d}-{day:02d} {clock}', '%Y-%m-%d %H:%M:%S')
+        candidate = dt.datetime.strptime('%04d-%02d-%02d %s' % (now.year, month, day, clock), '%Y-%m-%d %H:%M:%S')
     except ValueError:
         return None
     # Syslog clásico carece de año: inferir el último día coincidente no futuro.
@@ -113,7 +114,7 @@ def report_section(out, title, counter, top, unit=''):
     if not counter:
         out.append('Sin datos disponibles.')
     for name, count in counter.most_common(top):
-        out.append(f'{count:>8} {unit} {name}')
+        out.append('{0:>8} {1} {2}'.format(count, unit, name))
 
 
 def main():
@@ -185,10 +186,10 @@ def main():
                     stats['smtp_auth_fail'] += 1
                     ip = IP.search(line)
                     if ip:
-                        auth_smtp_ips[ip[1]] += 1
+                        auth_smtp_ips[ip.group(1)] += 1
                     user = re.search(r'(?:set_id|user(?:name)?)[=:]\s*<?([^>\s,]+)', line, re.I)
                     if user:
-                        auth_smtp_fail[user[1].rstrip(')')] += 1
+                        auth_smtp_fail[user.group(1).rstrip(')')] += 1
             continue
 
         stamp, msgid, flag, rest = m.groups()
@@ -212,7 +213,7 @@ def main():
                 sender=sender,
                 auth=auth,
                 user=user_field,
-                ip=ipmatch[1] if ipmatch else '',
+                ip=ipmatch.group(1) if ipmatch else '',
                 subject=subject(field('T', rest)),
                 local=protocol in ('local', 'local-bsmtp') or bool(user_field),
             )
@@ -252,7 +253,7 @@ def main():
         auth_user = data['auth'].split(':', 1)[-1] if data['auth'] else ''
         if auth_user or data['local']:
             outbound_senders[data['sender']] += 1
-        actor = auth_user or (f"U={data['user']}" if data['local'] and data['user'] else data['sender'])
+        actor = auth_user or ('U=%s' % data['user'] if data['local'] and data['user'] else data['sender'])
         if data['subject'] != '(asunto no registrado)':
             subjects[data['subject']] += 1
             subject_actors[data['subject']][actor] += 1
@@ -268,12 +269,12 @@ def main():
     subjects_annotated = collections.Counter()
     for subj_text, total_count in subjects.items():
         top_actor, actor_count = subject_actors[subj_text].most_common(1)[0]
-        subjects_annotated[f'{subj_text}  [principal: {top_actor} ({actor_count})]'] = total_count
+        subjects_annotated['%s  [principal: %s (%d)]' % (subj_text, top_actor, actor_count)] = total_count
 
     auth_multi_ip = collections.Counter()
     for user, ip_set in auth_ips_by_user.items():
         if len(ip_set) > 1:
-            auth_multi_ip[f'{user} ({mail_auth[user]} envíos)'] = len(ip_set)
+            auth_multi_ip['%s (%d envíos)' % (user, mail_auth[user])] = len(ip_set)
 
     for msgid, dest in failures:
         if msgid in arrivals:
@@ -301,24 +302,27 @@ def main():
                 stats['dovecot_auth_fail'] += 1
                 auth_dovecot_user[username] += 1
                 if ip:
-                    auth_dovecot_ip[ip[1]] += 1
+                    auth_dovecot_ip[ip.group(1)] += 1
             if success:
                 stats['dovecot_login_ok'] += 1
                 auth_dovecot_success[username] += 1
 
     out = [
         'REPORTE DE AUDITORÍA EXIM / DOVECOT',
-        f'Período: {since:%Y-%m-%d %H:%M:%S} a {now:%Y-%m-%d %H:%M:%S} (hora local del servidor)',
-        f'Archivos Exim: {len(exim_files)} | registros mail/secure: {len(mail_files)}',
-        f'Mensajes aceptados (<=): {stats["accepted"]}',
-        f'Invocaciones de scripts/directorios (cwd=): {stats["cwd_events"]}',
-        f'Eventos entrega correcta (=> / ->): {stats["delivery_ok"]}',
-        f'Eventos fallos permanentes (**): {stats["delivery_fail"]}',
-        f'Eventos diferidos (==): {stats["delivery_defer_events"]}',
-        f'Mensajes con rebote atribuible: {len(bounced_messages)}',
-        f'Fallos autenticación SMTP: {stats["smtp_auth_fail"]}',
-        f'Fallos autenticación Dovecot: {stats["dovecot_auth_fail"]}',
-        f'Accesos Dovecot correctos: {stats["dovecot_login_ok"]}',
+        'Período: %s a %s (hora local del servidor)' % (
+            since.strftime('%Y-%m-%d %H:%M:%S'),
+            now.strftime('%Y-%m-%d %H:%M:%S'),
+        ),
+        'Archivos Exim: %d | registros mail/secure: %d' % (len(exim_files), len(mail_files)),
+        'Mensajes aceptados (<=): %d' % stats['accepted'],
+        'Invocaciones de scripts/directorios (cwd=): %d' % stats['cwd_events'],
+        'Eventos entrega correcta (=> / ->): %d' % stats['delivery_ok'],
+        'Eventos fallos permanentes (**): %d' % stats['delivery_fail'],
+        'Eventos diferidos (==): %d' % stats['delivery_defer_events'],
+        'Mensajes con rebote atribuible: %d' % len(bounced_messages),
+        'Fallos autenticación SMTP: %d' % stats['smtp_auth_fail'],
+        'Fallos autenticación Dovecot: %d' % stats['dovecot_auth_fail'],
+        'Accesos Dovecot correctos: %d' % stats['dovecot_login_ok'],
         'NOTA: estadísticas de entregas corresponden a eventos, no a mensajes únicos.',
         'NOTA: eventos de fallos pueden proceder de mensajes anteriores al período;',
         'solo se atribuyen a remitentes aquellos cuya línea de recepción está disponible.',
