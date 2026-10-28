@@ -11,6 +11,7 @@ import collections
 import datetime as dt
 import glob
 import gzip
+import io
 import os
 import re
 import sys
@@ -118,6 +119,10 @@ def report_section(out, title, counter, top, unit=''):
 
 
 def main():
+    if (getattr(sys.stdout, 'encoding', None) or '').lower() != 'utf-8' and hasattr(sys.stdout, 'buffer'):
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    if (getattr(sys.stderr, 'encoding', None) or '').lower() != 'utf-8' and hasattr(sys.stderr, 'buffer'):
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
     epilog = (
         'Ejemplos de uso:\n'
         '  python3 <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/secops/exim-audit.py)\n'
