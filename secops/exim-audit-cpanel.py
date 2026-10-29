@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""Auditoría de Exim y Dovecot para cPanel/WHM (/var/log/exim_mainlog). Solo lectura.
+"""Auditoría de envíos salientes en Exim y Dovecot para cPanel/WHM (/var/log/exim_mainlog). Solo lectura.
 
 Compatible con Python 3.4+ (sin f-strings ni subíndices de Match).
+Por defecto filtra únicamente CORREO SALIENTE / LOCAL (autenticado por SMTP,
+generado por scripts/procesos locales o desde localhost), ignorando correo entrante.
+
 Ejecución directa:
   python3 <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/secops/exim-audit-cpanel.py)
   python3 <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/secops/exim-audit-cpanel.py) --days 3 --top 30
@@ -24,6 +27,9 @@ ISOLOG = re.compile(r'^(\d{4}-\d\d-\d\d[T ]\d\d:\d\d:\d\d)(?:[.,]\d+)?(?:Z|[+-]\
 IP = re.compile(r'\[([0-9a-fA-F:.]+)\]')
 HOME_USER = re.compile(r'^/home\d*/([^/\s]+)')
 MONTHS = {m: i for i, m in enumerate(['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'], 1)}
+AUTH_PROTOCOLS = {'esmtpa', 'esmtpsa', 'smtpa', 'smtpsa', 'utf8esmtpa', 'utf8esmtpsa'}
+LOCAL_PROTOCOLS = {'local', 'local-bsmtp', 'local-esmtp'}
+FILTER_USERS = {'mail', 'exim', 'mailnull', 'debian-exim', 'dovecot'}
 SYSTEM_USERS = {'root', 'mailnull', 'exim', 'cpanel', 'nobody', 'dovecot', 'mailman'}
 IGNORE_CWD = {'/var/spool/exim', '/etc/csf', '/var/spool/cron', '/usr/local/cpanel/whostmgr/docroot'}
 
@@ -44,6 +50,22 @@ def extract_addr(rest):
     if m:
         return m.group(1)
     return rest.split(' ', 1)[0] or '(desconocido)'
+
+
+def is_outbound_arrival(sender, protocol, auth, user_field, ip):
+    if sender == '<>':
+        return False
+    if protocol == 'spam-scanned':
+        return False
+    if auth or protocol in AUTH_PROTOCOLS:
+        return True
+    if protocol in LOCAL_PROTOCOLS:
+        return True
+    if user_field and user_field.lower() not in FILTER_USERS:
+        return True
+    if ip in ('127.0.0.1', '::1'):
+        return True
+    return False
 
 
 def load_userdomains(path='/etc/userdomains'):
@@ -164,7 +186,7 @@ def main():
         '  python3 <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/secops/exim-audit-cpanel.py) --days 3 --top 30\n'
     )
     parser = argparse.ArgumentParser(
-        description='Reporte de auditoría y detección de abuso en Exim + Dovecot para cPanel/WHM (solo lectura)',
+        description='Reporte de auditoría de envíos salientes y abuso en Exim + Dovecot para cPanel/WHM (solo lectura)',
         epilog=epilog,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -173,6 +195,7 @@ def main():
     parser.add_argument('--output', help='Archivo de salida; si se omite, imprime en pantalla')
     parser.add_argument('--exim-log', default='/var/log/exim_mainlog', help='Ruta base de log Exim en cPanel (por defecto /var/log/exim_mainlog)')
     parser.add_argument('--mail-log', default='/var/log/maillog', help='Base de log Dovecot (por defecto /var/log/maillog)')
+    parser.add_argument('--include-inbound', action='store_true', help='Incluir también correos entrantes externos (por defecto solo analiza envíos salientes/locales)')
     args = parser.parse_args()
     if not (1 <= args.days <= 3660 and 1 <= args.top <= 1000):
         parser.error('--days o --top fuera de rango')
@@ -185,7 +208,7 @@ def main():
 
     userdomains = load_userdomains()
     stats = collections.Counter()
-    arrivals = {}  # ID -> info, retenido para vincular fallos y remitentes
+    arrivals = {}  # ID -> info (solo mensajes contabilizados: salientes o todos si --include-inbound)
     failures = set()
     deferred = set()
     recipients = collections.Counter()
@@ -253,34 +276,47 @@ def main():
             # IP origen en H=, evitando confundirla con el campo I= (IP del servidor).
             h = re.search(r'(?<!\S)H=(.*?)(?=\s(?:[A-Z]|id|T)=|$)', rest)
             ipmatch = IP.search(h.group(1)) if h else None
+            ip_val = ipmatch.group(1) if ipmatch else ''
+            if sender == '<>':
+                stats['bounces_generated'] += 1
+            outbound = is_outbound_arrival(sender, protocol, auth, user_field, ip_val)
+            if not outbound and not args.include_inbound:
+                if sender != '<>':
+                    stats['inbound_ignored'] += 1
+                continue
             arrivals[msgid] = dict(
                 sender=sender,
                 auth=auth,
                 user=user_field,
-                ip=ipmatch.group(1) if ipmatch else '',
+                ip=ip_val,
                 subject=subject(field('T', rest)),
-                local=protocol in ('local', 'local-bsmtp') or bool(user_field),
+                local=protocol in LOCAL_PROTOCOLS or (bool(user_field) and user_field.lower() not in FILTER_USERS),
             )
             stats['accepted'] += 1
             hourly[timestamp.strftime('%Y-%m-%d %H:00')] += 1
         elif flag in ('=>', '->'):
+            if not args.include_inbound and msgid not in arrivals:
+                continue
             dest = extract_addr(rest)
             recipients[dest] += 1
             stats['delivery_ok'] += 1
         elif flag == '**':
+            if not args.include_inbound and msgid not in arrivals:
+                continue
             dest = extract_addr(rest)
             failures.add((msgid, dest))
             stats['delivery_fail'] += 1
             reason = rest.split(' SMTP error from remote mail server', 1)
             fail_reason['SMTP error from remote mail server' if len(reason) > 1 else (rest[-110:] or '(sin detalle)')] += 1
         elif flag == '==':
+            if not args.include_inbound and msgid not in arrivals:
+                continue
             dest = extract_addr(rest)
             deferred.add((msgid, dest))
             stats['delivery_defer_events'] += 1
             deferrals_reason[rest[-110:] or '(sin detalle)'] += 1
 
     senders = collections.Counter()
-    outbound_senders = collections.Counter()
     subjects = collections.Counter()
     subject_actors = collections.defaultdict(collections.Counter)
     ips = collections.Counter()
@@ -294,11 +330,9 @@ def main():
     for msgid, data in arrivals.items():
         senders[data['sender']] += 1
         auth_user = data['auth'].split(':', 1)[-1] if data['auth'] else ''
-        if auth_user or data['local']:
-            outbound_senders[data['sender']] += 1
-            cpuser = resolve_cpuser(auth_user, data['user'], data['sender'], userdomains)
-            if cpuser:
-                cpanel_accounts['%s (mensajes <=)' % cpuser] += 1
+        cpuser = resolve_cpuser(auth_user, data['user'], data['sender'], userdomains)
+        if cpuser:
+            cpanel_accounts['%s (envíos <=)' % cpuser] += 1
         actor = auth_user or ('U=%s' % data['user'] if data['local'] and data['user'] else data['sender'])
         if data['subject'] != '(asunto no registrado)':
             subjects[data['subject']] += 1
@@ -353,49 +387,49 @@ def main():
                 stats['dovecot_login_ok'] += 1
                 auth_dovecot_success[username] += 1
 
+    modo = 'SALIENTE + ENTRANTE (--include-inbound)' if args.include_inbound else 'SOLO ENVÍOS SALIENTES / LOCALES (entrantes filtrados)'
     out = [
         'REPORTE DE AUDITORÍA EXIM / DOVECOT (cPanel/WHM)',
+        'Modo de análisis: %s' % modo,
         'Período: %s a %s (hora local del servidor)' % (
             since.strftime('%Y-%m-%d %H:%M:%S'),
             now.strftime('%Y-%m-%d %H:%M:%S'),
         ),
         'Archivos Exim (%s): %d | registros mail/secure: %d' % (args.exim_log, len(exim_files), len(mail_files)),
-        'Mensajes aceptados (<=): %d' % stats['accepted'],
+        'Envíos salientes/locales contabilizados (<=): %d' % stats['accepted'],
+        'Correos entrantes externos ignorados: %d' % stats['inbound_ignored'],
+        'Rebotes del sistema (<>) detectados: %d' % stats['bounces_generated'],
         'Invocaciones de scripts/directorios (cwd=): %d' % stats['cwd_events'],
-        'Eventos entrega correcta (=> / ->): %d' % stats['delivery_ok'],
-        'Eventos fallos permanentes (**): %d' % stats['delivery_fail'],
-        'Eventos diferidos (==): %d' % stats['delivery_defer_events'],
-        'Mensajes con rebote atribuible: %d' % len(bounced_messages),
+        'Entregas de envíos contabilizados (=> / ->): %d' % stats['delivery_ok'],
+        'Fallos permanentes de envíos (**): %d' % stats['delivery_fail'],
+        'Diferimientos de envíos (==): %d' % stats['delivery_defer_events'],
+        'Envíos con rebote atribuible: %d' % len(bounced_messages),
         'Fallos autenticación SMTP: %d' % stats['smtp_auth_fail'],
         'Fallos autenticación Dovecot: %d' % stats['dovecot_auth_fail'],
         'Accesos Dovecot correctos: %d' % stats['dovecot_login_ok'],
-        'NOTA: estadísticas de entregas corresponden a eventos, no a mensajes únicos.',
-        'NOTA: eventos de fallos pueden proceder de mensajes anteriores al período;',
-        'solo se atribuyen a remitentes aquellos cuya línea de recepción está disponible.',
     ]
-    report_section(out, 'HORAS CON MÁS MENSAJES ACEPTADOS', hourly, args.top)
+    report_section(out, 'HORAS CON MÁS ENVÍOS SALIENTES', hourly, args.top)
     report_section(out, 'TOP CUENTAS CPANEL ASOCIADAS (U=, /etc/userdomains o cwd=)', cpanel_accounts, args.top)
-    report_section(out, 'TOP REMITENTES SALIENTES / LOCALES (SMTP Auth o proceso local)', outbound_senders, args.top)
-    report_section(out, 'TOP REMITENTES GLOBALES (mensajes aceptados, incluyendo entrante)', senders, args.top)
-    report_section(out, 'TOP ASUNTOS Y EMISOR PRINCIPAL (solo si Exim registra T=)', subjects_annotated, args.top)
+    report_section(out, 'TOP REMITENTES DE ENVÍOS SALIENTES (From <=)', senders, args.top)
+    report_section(out, 'TOP ASUNTOS DE ENVÍOS Y EMISOR PRINCIPAL (T=)', subjects_annotated, args.top)
     report_section(out, 'TOP DIRECTORIOS DE EJECUCIÓN DE SCRIPTS (cwd= en Exim)', cwd_dirs, args.top)
     report_section(out, 'TOP USUARIOS SMTP AUTENTICADOS (dovecot_login / dovecot_plain)', mail_auth, args.top)
     report_section(out, 'TOP USUARIOS SMTP DESDE MÚLTIPLES IPs (posible cuenta comprometida)', auth_multi_ip, args.top, unit='IPs')
-    report_section(out, 'TOP PROCESOS/USUARIOS DEL SISTEMA (U= en envíos aceptados)', local_users, args.top)
-    report_section(out, 'TOP DESTINATARIOS (entregas correctas)', recipients, args.top)
-    report_section(out, 'TOP IP ORIGEN DE MENSAJES ACEPTADOS', ips, args.top)
-    report_section(out, 'TOP REMITENTES POR DESTINATARIOS CON FALLO PERMANENTE', failed_by_sender, args.top)
-    report_section(out, 'TOP REMITENTES POR DESTINATARIOS DIFERIDOS', deferred_by_sender, args.top)
+    report_section(out, 'TOP PROCESOS/USUARIOS DEL SISTEMA (U= en envíos)', local_users, args.top)
+    report_section(out, 'TOP DESTINATARIOS DE ENVÍOS SALIENTES (=> / ->)', recipients, args.top)
+    report_section(out, 'TOP IP ORIGEN DE ENVÍOS SALIENTES', ips, args.top)
+    report_section(out, 'TOP REMITENTES POR DESTINATARIOS CON FALLO PERMANENTE (**)', failed_by_sender, args.top)
+    report_section(out, 'TOP REMITENTES POR DESTINATARIOS DIFERIDOS (==)', deferred_by_sender, args.top)
     report_section(out, 'TOP USUARIOS CON FALLOS DOVECOT', auth_dovecot_user, args.top)
     report_section(out, 'TOP IP CON FALLOS DOVECOT', auth_dovecot_ip, args.top)
     report_section(out, 'TOP IP CON FALLOS SMTP AUTH', auth_smtp_ips, args.top)
     report_section(out, 'TOP USUARIOS CON FALLOS SMTP AUTH (si se registra usuario)', auth_smtp_fail, args.top)
     report_section(out, 'TOP USUARIOS CON LOGIN DOVECOT EXITOSO', auth_dovecot_success, args.top)
-    report_section(out, 'TOP MOTIVOS DE FALLO (texto resumido del log)', fail_reason, args.top)
-    report_section(out, 'TOP MOTIVOS DE DIFERIMIENTO (texto resumido del log)', deferrals_reason, args.top)
+    report_section(out, 'TOP MOTIVOS DE FALLO EN ENVÍOS (**)', fail_reason, args.top)
+    report_section(out, 'TOP MOTIVOS DE DIFERIMIENTO EN ENVÍOS (==)', deferrals_reason, args.top)
     if not subjects:
-        out.append('\nAVISO: No se encontraron asuntos T=. Revisar log_selector +subject en configuración Exim.')
-    out.append('\nAVISO: use TOP CUENTAS CPANEL, TOP REMITENTES SALIENTES y TOP DIRECTORIOS (cwd=) para ubicar el origen del abuso.')
+        out.append('\nAVISO: No se encontraron asuntos T= en envíos salientes. Revisar log_selector +subject en configuración Exim.')
+    out.append('\nNOTA: Los correos entrantes externos fueron excluidos automáticamente. Use --include-inbound si desea incluirlos.')
     output = '\n'.join(out) + '\n'
     if args.output:
         with open(args.output, 'w', encoding='utf-8') as fh:
