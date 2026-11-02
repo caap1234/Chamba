@@ -207,8 +207,15 @@ def main():
     if (getattr(sys.stderr, 'encoding', None) or '').lower() != 'utf-8' and hasattr(sys.stderr, 'buffer'):
         sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
+    epilog = (
+        "Ejemplos de ejecución directa en terminal (One-liner):\n"
+        "  python 08_windows_server_investigator.py --days 3\n"
+        "  python 08_windows_server_investigator.py --ip 198.51.100.5\n"
+        "  python3 08_windows_server_investigator.py --mode offline --iis-dir /ruta/a/W3SVC1\n"
+    )
     parser = argparse.ArgumentParser(
         description='08. Windows Server Investigator — Auditoría de IIS, RDP, Eventos y Persistencia en Windows',
+        epilog=epilog,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument('--mode', choices=['live', 'offline', 'auto'], default='auto',
@@ -219,6 +226,20 @@ def main():
     parser.add_argument('--output', help='Ruta para guardar el reporte')
     parser.add_argument('--rdp-check', action='store_true', default=True, help='Auditar sesiones RDP')
     parser.add_argument('--interactive', action='store_true', help='Modo interactivo')
+
+    if len(sys.argv) == 1 and sys.stdin.isatty():
+        print("=" * 70)
+        print("  08. Windows Server Investigator — Asistente de Inicio")
+        print("=" * 70)
+        print("Selecciona cómo deseas ejecutar:")
+        print("  1) Asistente interactivo guiado (Paso a paso) [Recomendado]")
+        print("  2) Ver ayuda completa y opciones de comando (--help)")
+        opt = input("Opción [1-2, def: 1]: ").strip()
+        if opt == '2':
+            parser.print_help()
+            sys.exit(0)
+        else:
+            sys.argv.append('--interactive')
 
     args = parser.parse_args()
 
@@ -349,3 +370,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

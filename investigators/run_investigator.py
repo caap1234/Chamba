@@ -13,13 +13,21 @@ Lanzador interactivo para la suite completa de herramientas de investigación:
 07. Suspicious Activity Correlator
 08. Windows Server Investigator
 09. Service Health & Exposure Check
+
+Uso directo en cualquier servidor (sin necesidad de clonar el repo):
+  python3 <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/run_investigator.py)
+  python3 <(curl -sL https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/run_investigator.py)
 """
 
 import os
 import subprocess
 import sys
+import tempfile
+import urllib.request
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+RAW_GITHUB_BASE = "https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/"
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else '/tmp'
 
 TOOLS = [
     ("01", "Abuse Mail Investigator", "01_abuse_mail_investigator.py", "Exim, Dovecot, Spam, Webmail X-Forwarded-For"),
@@ -38,6 +46,45 @@ def clear_screen():
     os.system('cls' if os.name == 'nt' else 'clear')
 
 
+def ensure_script_available(script_name):
+    """
+    Verifica si el script está en disco local. Si no existe (ej. ejecución
+    vía pipe wget o curl), lo descarga automáticamente de GitHub a /tmp.
+    """
+    local_path = os.path.join(SCRIPT_DIR, script_name)
+    if os.path.isfile(local_path):
+        return local_path
+
+    tmp_path = os.path.join(tempfile.gettempdir(), script_name)
+    if os.path.isfile(tmp_path):
+        return tmp_path
+
+    # Descargar desde GitHub raw
+    url = RAW_GITHUB_BASE + script_name
+    print("[*] Descargando módulo '%s' desde GitHub..." % script_name)
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Neubox-Investigator-Runner/1.0'})
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            content = resp.read()
+        with open(tmp_path, 'wb') as fh:
+            fh.write(content)
+        os.chmod(tmp_path, 0o755)
+        print("[+] Descarga completada en: %s" % tmp_path)
+        return tmp_path
+    except Exception as e:
+        print("[!] Error descargando módulo desde %s: %s" % (url, e))
+        # Intento fallback con wget o curl
+        try:
+            cmd = ['wget', '-qO', tmp_path, url]
+            subprocess.run(cmd, timeout=10)
+            if os.path.isfile(tmp_path) and os.path.getsize(tmp_path) > 0:
+                os.chmod(tmp_path, 0o755)
+                return tmp_path
+        except Exception:
+            pass
+        return None
+
+
 def print_banner():
     print("=" * 80)
     print("        NEUBOX INCIDENT RESPONSE & ABUSE INVESTIGATION TOOLKIT")
@@ -53,6 +100,7 @@ def main():
     if '--help' in sys.argv or '-h' in sys.argv:
         print(__doc__)
         sys.exit(0)
+
     while True:
         print_banner()
         choice = input("\nIngresa el número de módulo [01-09, 00 para salir]: ").strip()
@@ -75,26 +123,36 @@ def main():
             continue
 
         num, name, script_name, desc = matched_tool
-        script_path = os.path.join(SCRIPT_DIR, script_name)
+        script_path = ensure_script_available(script_name)
 
-        if not os.path.isfile(script_path):
-            print("\n[!] Error: No se localizó el archivo: %s" % script_path)
+        if not script_path or not os.path.isfile(script_path):
+            print("\n[!] Error: No se pudo obtener el script: %s" % script_name)
             input("Presiona Enter para continuar...")
             continue
 
         print("\n" + "=" * 80)
         print("EJECUTANDO: [%s] %s" % (num, name))
         print("=" * 80)
-        print("Para pasar parámetros directos o modo interactivo:")
-        extra_args = input("Ingresa parámetros adicionales (o Enter para modo guiado interactivo): ").strip()
+        print("¿Cómo deseas ejecutar el módulo?")
+        print("  1) Asistente interactivo guiado (Paso a paso) [Recomendado]")
+        print("  2) Ver ayuda completa y ejemplos (--help)")
+        print("  3) Personalizar parámetros manualmente en línea de comandos")
+        print("  4) Ejecución rápida estándar con valores por defecto")
+        mode_sel = input("Opción [1-4, def: 1]: ").strip()
 
         cmd = [sys.executable, script_path]
-        if extra_args:
-            cmd.extend(extra_args.split())
+        if mode_sel == '2':
+            cmd.append('--help')
+        elif mode_sel == '3':
+            user_params = input("Ingresa los argumentos (ej. --server cpanel --email user@dom.com): ").strip()
+            if user_params:
+                cmd.extend(user_params.split())
+        elif mode_sel == '4':
+            pass
         else:
             cmd.append('--interactive')
 
-        print("\n[+] Comando: %s\n" % " ".join(cmd))
+        print("\n[+] Comando a ejecutar: %s\n" % " ".join(cmd))
         try:
             subprocess.run(cmd)
         except KeyboardInterrupt:
@@ -103,7 +161,7 @@ def main():
             print("\n[!] Error ejecutando módulo: %s" % e)
 
         print("\n" + "-" * 80)
-        input("Ejecución finalizada. Presiona Enter para volver al menú principal...")
+        input("Presiona Enter para volver al menú principal...")
 
 
 if __name__ == '__main__':

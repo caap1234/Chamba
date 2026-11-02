@@ -144,8 +144,15 @@ def main():
     if (getattr(sys.stderr, 'encoding', None) or '').lower() != 'utf-8' and hasattr(sys.stderr, 'buffer'):
         sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
+    epilog = (
+        "Ejemplos de ejecución directa en terminal (One-liner):\n"
+        "  python3 <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/04_account_access_investigator.py) --user cliente1 --days 7\n"
+        "  python3 <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/04_account_access_investigator.py) --ip 198.51.100.25\n"
+        "  python3 <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/04_account_access_investigator.py) --user root --days 3\n"
+    )
     parser = argparse.ArgumentParser(
         description='04. Account Access Investigator — Auditoría Forense de Logins en cPanel, WHM, DirectAdmin y SSH',
+        epilog=epilog,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument('--server', choices=['cpanel', 'directadmin', 'generic', 'auto'], default='auto')
@@ -154,6 +161,20 @@ def main():
     parser.add_argument('--days', type=int, default=7, help='Días hacia atrás a investigar (def: 7)')
     parser.add_argument('--output', help='Ruta para guardar el reporte')
     parser.add_argument('--interactive', action='store_true', help='Ejecutar en modo interactivo')
+
+    if len(sys.argv) == 1 and sys.stdin.isatty():
+        print("=" * 70)
+        print("  04. Account Access Investigator — Asistente de Inicio")
+        print("=" * 70)
+        print("Selecciona cómo deseas ejecutar:")
+        print("  1) Asistente interactivo guiado (Paso a paso) [Recomendado]")
+        print("  2) Ver ayuda completa y opciones de comando (--help)")
+        opt = input("Opción [1-2, def: 1]: ").strip()
+        if opt == '2':
+            parser.print_help()
+            sys.exit(0)
+        else:
+            sys.argv.append('--interactive')
 
     args = parser.parse_args()
 
@@ -485,3 +506,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

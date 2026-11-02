@@ -172,8 +172,14 @@ def main():
     if (getattr(sys.stderr, 'encoding', None) or '').lower() != 'utf-8' and hasattr(sys.stderr, 'buffer'):
         sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
+    epilog = (
+        "Ejemplos de ejecución directa en terminal (One-liner):\n"
+        "  python3 <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/05_abuse_evidence_collector.py) --case-id IRIS-9821 --domain cliente.com --abuse-type malware\n"
+        "  python3 <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/05_abuse_evidence_collector.py) --case-id INC-4412 --abuse-type spam --ip 198.51.100.2\n"
+    )
     parser = argparse.ArgumentParser(
         description='05. Abuse Evidence Collector — Recolector Forense Multiplataforma para Casos IRIS',
+        epilog=epilog,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument('--case-id', default='TICKET-PENDING', help='ID del Caso o Ticket en IRIS')
@@ -187,6 +193,20 @@ def main():
     parser.add_argument('--grep', help='Término de búsqueda o patrón a extraer de los logs')
     parser.add_argument('--output', help='Ruta para guardar el reporte (def: evidencia_<case_id>.txt)')
     parser.add_argument('--interactive', action='store_true', help='Modo interactivo')
+
+    if len(sys.argv) == 1 and sys.stdin.isatty():
+        print("=" * 70)
+        print("  05. Abuse Evidence Collector — Asistente de Inicio")
+        print("=" * 70)
+        print("Selecciona cómo deseas ejecutar:")
+        print("  1) Asistente interactivo guiado (Paso a paso) [Recomendado]")
+        print("  2) Ver ayuda completa y opciones de comando (--help)")
+        opt = input("Opción [1-2, def: 1]: ").strip()
+        if opt == '2':
+            parser.print_help()
+            sys.exit(0)
+        else:
+            sys.argv.append('--interactive')
 
     args = parser.parse_args()
 
@@ -342,3 +362,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

@@ -290,8 +290,16 @@ def main():
     if (getattr(sys.stderr, 'encoding', None) or '').lower() != 'utf-8' and hasattr(sys.stderr, 'buffer'):
         sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
+    epilog = (
+        "Ejemplos de ejecución directa en terminal (One-liner):\n"
+        "  python3 <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/01_abuse_mail_investigator.py)\n"
+        "  python3 <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/01_abuse_mail_investigator.py) --email cuenta@dominio.com --days 5\n"
+        "  python3 <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/01_abuse_mail_investigator.py) --domain dominio.com --top 30\n"
+        "  python3 <(curl -sL https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/01_abuse_mail_investigator.py) --server directadmin\n"
+    )
     parser = argparse.ArgumentParser(
         description='01. Abuse Mail Investigator — Auditoría Forense de Exim, Dovecot y Webmail (cPanel & DirectAdmin)',
+        epilog=epilog,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument('--server', choices=['cpanel', 'directadmin', 'auto'], default='auto',
@@ -306,6 +314,22 @@ def main():
     parser.add_argument('--cpanel-access-log', help='Ruta personalizada de access_log de cPanel')
     parser.add_argument('--interactive', action='store_true', help='Iniciar en modo interactivo')
 
+    # Si se ejecuta sin parámetros en una terminal interactiva, guiar al analista
+    if len(sys.argv) == 1 and sys.stdin.isatty():
+        print("=" * 70)
+        print("  01. Abuse Mail Investigator — Asistente de Inicio")
+        print("=" * 70)
+        print("Selecciona cómo deseas ejecutar:")
+        print("  1) Asistente interactivo guiado (Paso a paso) [Recomendado]")
+        print("  2) Auditoría general del servidor (últimos 3 días)")
+        print("  3) Ver opciones y ejemplos de comando (--help)")
+        opt = input("Opción [1-3, def: 1]: ").strip()
+        if opt == '3':
+            parser.print_help()
+            sys.exit(0)
+        elif opt == '1' or opt == '':
+            sys.argv.append('--interactive')
+
     args = parser.parse_args()
 
     # Selección de servidor
@@ -314,6 +338,20 @@ def main():
         detected = detect_server_type()
         if args.interactive:
             server = prompt_server_type()
+            # Preguntar por objetivo
+            print("\n¿Qué objetivo deseas auditar?")
+            print("  1) Auditoría general del servidor")
+            print("  2) Una cuenta de correo específica")
+            print("  3) Todo un dominio")
+            obj_sel = input("Opción [1-3, def: 1]: ").strip()
+            if obj_sel == '2':
+                args.email = input("Ingresa la cuenta de correo (ej. info@empresa.com): ").strip()
+            elif obj_sel == '3':
+                args.domain = input("Ingresa el dominio (ej. empresa.com): ").strip()
+
+            days_in = input("Días hacia atrás a analizar [por defecto 3]: ").strip()
+            if days_in.isdigit():
+                args.days = int(days_in)
         else:
             if detected != 'unknown':
                 server = detected
@@ -708,3 +746,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

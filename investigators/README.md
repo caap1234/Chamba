@@ -196,3 +196,4 @@ Copiar y pegar las siguientes secciones directamente en el caso de IRIS:
 ```
 
 Esta sección incluye de 5 a 15 líneas completas y sin truncar de los logs analizados (como `exim_mainlog`, domlogs de Apache, `access_log` de cPanel con `X-Forwarded-For`, o eventos de seguridad de Windows) con el formato exacto requerido por el equipo de respuesta a incidentes de Neubox.
+
