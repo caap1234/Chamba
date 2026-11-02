@@ -211,11 +211,13 @@ class TemplateClassifier:
                 ollama_url,
                 json={
                     "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "format": "json",
-                    "stream": False
+                    "messages": [{"role": "user", "content": prompt + "\n/no_think"}],
+                    "stream": False,
+                    "think": False,
+                    "options": {"num_ctx": 4096, "num_predict": 256, "temperature": 0.1}
                 },
-                timeout=20
+                timeout=15,
+                proxies={"http": None, "https": None}
             )
             if r.status_code == 200:
                 content = r.json().get("message", {}).get("content", "")

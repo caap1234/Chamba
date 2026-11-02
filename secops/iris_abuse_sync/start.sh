@@ -9,6 +9,11 @@ PID_FILE="${SCRIPT_DIR}/.service.pid"
 LOG_FILE="${SCRIPT_DIR}/web.log"
 PORT=8080
 
+# Prevent terminal proxy variables from interfering with local loopback calls (127.0.0.1 / Ollama)
+unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
+export NO_PROXY="127.0.0.1,localhost"
+export no_proxy="127.0.0.1,localhost"
+
 if [ ! -f "${VENV_PYTHON}" ]; then
   echo "Virtual environment no encontrado en ${SCRIPT_DIR}/venv"
   echo "Creando entorno virtual e instalando requerimientos..."
@@ -19,13 +24,13 @@ fi
 get_pid() {
   if [ -f "${PID_FILE}" ]; then
     PID=$(cat "${PID_FILE}")
-    if ps -p "${PID}" > /dev/null 2>&1; then
+    if ps -p "${PID}" -o command= 2>/dev/null | grep -q "web.py"; then
       echo "${PID}"
       return 0
     fi
   fi
-  # Fallback: check port listener
-  PID=$(lsof -ti :${PORT} 2>/dev/null | head -n 1)
+  # Fallback: check port listener (only LISTEN state, not browser clients)
+  PID=$(lsof -tiTCP:${PORT} -sTCP:LISTEN 2>/dev/null | head -n 1)
   if [ -n "${PID}" ]; then
     echo "${PID}" > "${PID_FILE}"
     echo "${PID}"
@@ -89,9 +94,9 @@ case "${MODE}" in
       echo "  • Memoria: $(ps -o rss= -p "${PID}" 2>/dev/null | awk '{print int($1/1024) " MB"}')"
       echo ""
       echo "Comprobando endpoint de salud:"
-      curl -s --max-time 3 http://127.0.0.1:${PORT}/api/status | grep -q '"status":"online"' \
-        && echo "  • API: Online y respondiendo correctamente" \
-        || echo "  • API: No responde"
+      curl -s --noproxy "*" --max-time 3 http://127.0.0.1:${PORT}/api/health | grep -Eq '"status":"(ok|online)"' \
+        && echo "  • API v3.0: Online y respondiendo correctamente" \
+        || echo "  • API v3.0: No responde"
     else
       echo "✗ ESTADO: INACTIVO (Detenido)"
       echo "  Para iniciarlo ejecuta: ./start.sh start"

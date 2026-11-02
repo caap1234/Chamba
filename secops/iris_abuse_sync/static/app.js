@@ -1,1575 +1,1419 @@
-// DFIR-IRIS Abuse Sync Frontend Controller (v2.2)
-// Supports: Live Markdown Preview, DFIR-IRIS Case Management, Report Generation & PDF Export
+/**
+ * DFIR-IRIS Abuse Sync — Consola SOC v3.0 (NBX & HP)
+ * Arquitectura modular frontend conectada a FastAPI + PostgreSQL + DFIR-IRIS v2.4.29 + Google Gemini SDK
+ */
 
-let currentParsedData = null;
-let currentClassification = null;
-let currentPreviewPayload = null;
-let availableTemplates = [];
-let activeCustomer = "neubox"; // "neubox" or "hospedando"
-let currentIocs = [];
-let attachedEvidences = []; // Evidence files to upload to IRIS datastore
+const SOC_STATE = {
+  currentView: "dashboard",
+  globalOrg: "",
+  csrfToken: null,
+  currentUser: null,
+  catalogs: null,
+  activeAlertId: null,
+  activeCaseId: null,
+  activeCaseBundle: null,
+  activeMigrationCaseId: null,
+};
 
-// Case Management State
-let loadedIrisCases = [];
-let currentCasesFilterState = "open"; // "open" or "all"
-let currentCasesFilterCust = "all"; // "all", "neubox", "hospedando"
-let activeReportCaseId = null;
-let activeReportCaseData = null;
-let allNotesInPreviewMode = false;
-
-document.addEventListener("DOMContentLoaded", () => {
-  initStatus();
-  initOllama();
-  initTemplates();
-  initDropzone();
-  initEvidenceDropzone();
-  initReportEditorPasteListener();
-  loadHistory();
-  loadIrisCases(false);
-});
-
-// Configure Marked options if loaded
-if (typeof marked !== "undefined") {
-  marked.setOptions({
-    gfm: true,
-    breaks: true
-  });
+function showToast(msg, duration = 3800) {
+  const el = document.getElementById("socToast");
+  if (!el) return;
+  el.textContent = msg;
+  el.style.display = "block";
+  clearTimeout(el._timer);
+  el._timer = setTimeout(() => {
+    el.style.display = "none";
+  }, duration);
 }
 
-function parseMarkdownSafe(mdText) {
-  if (!mdText) return "<p><em>(Sin contenido)</em></p>";
-  if (typeof marked !== "undefined" && typeof marked.parse === "function") {
-    return marked.parse(mdText);
+async function apiFetch(url, options = {}) {
+  const headers = Object.assign({ "Accept": "application/json" }, options.headers || {});
+  if (!(options.body instanceof FormData) && !headers["Content-Type"]) {
+    headers["Content-Type"] = "application/json";
   }
-  // Simple fallback
-  return mdText.replace(/\n/g, "<br>");
+  if (SOC_STATE.csrfToken) {
+    headers["X-CSRF-Token"] = SOC_STATE.csrfToken;
+  }
+  const resp = await fetch(url, Object.assign({}, options, { headers }));
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    throw new Error(data.detail || data.message || `HTTP ${resp.status}`);
+  }
+  return data;
 }
 
-function escapeHtml(str) {
-  if (str === null || str === undefined) return "";
-  return String(str)
+function esc(val, fallback = "—") {
+  if (val === null || val === undefined || val === "") return fallback;
+  return String(val)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
+    .replace(/"/g, "&quot;");
 }
 
-// -------------------------------------------------------------
-// Top Navigation Views (Ingest vs Cases)
-// -------------------------------------------------------------
-function switchMainView(viewName) {
-  const btnIngest = document.getElementById("tab-nav-ingest");
-  const btnCases = document.getElementById("tab-nav-cases");
-  const viewIngest = document.getElementById("view-ingest");
-  const viewCases = document.getElementById("view-cases");
-
-  if (viewName === "cases") {
-    btnCases.classList.add("active");
-    btnIngest.classList.remove("active");
-    viewCases.classList.remove("hidden");
-    viewIngest.classList.add("hidden");
-    loadIrisCases(true);
-  } else {
-    btnIngest.classList.add("active");
-    btnCases.classList.remove("active");
-    viewIngest.classList.remove("hidden");
-    viewCases.classList.add("hidden");
-  }
+function orgBadge(org) {
+  const o = (org || "NBX").toUpperCase();
+  return `<span class="badge ${o === "HP" ? "badge-hp" : "badge-nbx"}">${esc(o)}</span>`;
 }
 
-// -------------------------------------------------------------
-// 1. Fetch system status
-// -------------------------------------------------------------
-async function initStatus() {
+function provBadge(prov) {
+  const p = (prov || "rule").toLowerCase();
+  if (p === "manual") return `<span class="prov-tag prov-manual">MANUAL</span>`;
+  if (p === "ai") return `<span class="prov-tag prov-ai">GEMINI IA</span>`;
+  return `<span class="prov-tag prov-rule">REGLA</span>`;
+}
+
+// =========================================================
+// NAVEGACIÓN PRINCIPAL DE VISTAS
+// =========================================================
+const VIEW_TITLES = {
+  "dashboard": "Dashboard Operativo SOC (Datos Reales DFIR-IRIS & PostgreSQL)",
+  "alerts": "Centro de Alertas & Triage Comparativo (Reglas vs Gemini)",
+  "cases": "Gestión Estructurada de Casos DFIR-IRIS",
+  "case-workspace": "Estación de Investigación Estructurada del Caso",
+  "ingest": "Motor de Ingesta Multicanal & Empaquetado Forense SHA-256",
+  "migration": "Migración y Normalización de Casos Históricos a v3.0",
+  "connectors": "Conectores Externos & Monitoreo Blacklist Master RBL",
+  "admin": "Administración: Google Gemini API, Usuarios RBAC y Auditoría",
+};
+
+function switchView(viewName) {
+  SOC_STATE.currentView = viewName;
+  document.querySelectorAll(".view-section").forEach((s) => s.classList.remove("active"));
+  const target = document.getElementById(`view-${viewName}`);
+  if (target) target.classList.add("active");
+
+  document.querySelectorAll(".soc-sidebar .nav-btn").forEach((b) => {
+    b.classList.toggle("active", b.getAttribute("data-view") === viewName);
+  });
+
+  const titleEl = document.getElementById("currentViewTitle");
+  if (titleEl) titleEl.textContent = VIEW_TITLES[viewName] || "Consola SOC v3.0";
+
+  if (viewName === "dashboard") loadDashboard();
+  else if (viewName === "alerts") loadAlerts();
+  else if (viewName === "cases") loadCases();
+  else if (viewName === "migration") loadMigrationCases();
+  else if (viewName === "connectors") loadConnectorsView();
+  else if (viewName === "admin") loadAdminView();
+}
+
+function onGlobalOrgChange() {
+  const sel = document.getElementById("globalOrgFilter");
+  SOC_STATE.globalOrg = sel ? sel.value : "";
+  if (SOC_STATE.currentView === "alerts") loadAlerts();
+  else if (SOC_STATE.currentView === "cases") loadCases();
+  else loadDashboard();
+}
+
+// =========================================================
+// INICIALIZACIÓN Y CATÁLOGOS
+// =========================================================
+async function initSocConsole() {
   try {
-    const res = await fetch("/api/status");
-    const data = await res.json();
-
-    const badge = document.getElementById("iris-status-badge");
-    const text = document.getElementById("iris-status-text");
-    const urlPill = document.getElementById("iris-url-val");
-
-    urlPill.textContent = data.iris_url.replace(/^https?:\/\//, "");
-
-    if (data.iris_connected) {
-      badge.className = "status-indicator online";
-      text.textContent = "DFIR-IRIS Conectado";
-    } else {
-      badge.className = "status-indicator checking";
-      text.textContent = data.iris_error ? "DFIR-IRIS: Revisar API Key" : "DFIR-IRIS Offline";
+    const me = await apiFetch("/api/v1/auth/me");
+    if (me.authenticated && me.user) {
+      SOC_STATE.currentUser = me.user;
+      SOC_STATE.csrfToken = me.csrf_token;
+      updateUserUi();
     }
+  } catch (_) {}
 
-    if (data.default_customer) {
-      setCustomer(data.default_customer, false);
-    }
+  try {
+    const cats = await apiFetch("/api/v1/admin/catalogs");
+    SOC_STATE.catalogs = cats;
+    populateTaxonomySelects(cats);
   } catch (e) {
-    const badge = document.getElementById("iris-status-badge");
-    badge.className = "status-indicator offline";
-    document.getElementById("iris-status-text").textContent = "API Local No Disponible";
+    console.error("Error cargando catálogos:", e);
   }
-}
-
-// -------------------------------------------------------------
-// 2. Fetch Ollama models
-// -------------------------------------------------------------
-async function initOllama() {
-  const select = document.getElementById("ollama-model-select");
-  try {
-    const res = await fetch("/api/ollama/models");
-    const data = await res.json();
-    select.innerHTML = "";
-
-    if (data.available && data.models.length > 0) {
-      data.models.forEach(m => {
-        const opt = document.createElement("option");
-        opt.value = m;
-        opt.textContent = m;
-        if (m === data.current || (m.includes("qwen") && !data.current)) {
-          opt.selected = true;
-        }
-        select.appendChild(opt);
-      });
-    } else {
-      select.innerHTML = "<option value='none'>Ollama no detectado</option>";
-    }
-  } catch (e) {
-    select.innerHTML = "<option value='none'>Ollama no disponible</option>";
-  }
-}
-
-function onOllamaModelChange() {
-  console.log("Selected Ollama model:", document.getElementById("ollama-model-select").value);
-}
-
-// -------------------------------------------------------------
-// 3. Load available templates
-// -------------------------------------------------------------
-async function initTemplates() {
-  try {
-    const res = await fetch("/api/templates");
-    const data = await res.json();
-    availableTemplates = data.templates || [];
-
-    const select = document.getElementById("template-select");
-    select.innerHTML = "";
-    availableTemplates.forEach(t => {
-      const opt = document.createElement("option");
-      opt.value = t.name;
-      opt.textContent = `${t.prefix} ${t.display_name} (${t.name})`;
-      select.appendChild(opt);
-    });
-  } catch (e) {
-    console.error("Error loading templates", e);
-  }
-}
-
-// -------------------------------------------------------------
-// 4. Customer Switching (Neubox vs Hospedando)
-// -------------------------------------------------------------
-function setCustomer(custKey, triggerRecalc = true) {
-  activeCustomer = custKey.toLowerCase();
-
-  const btnNbx = document.getElementById("btn-cust-nbx");
-  const btnHp = document.getElementById("btn-cust-hp");
-
-  if (activeCustomer === "hospedando") {
-    btnHp.classList.add("active");
-    btnNbx.classList.remove("active");
-  } else {
-    btnNbx.classList.add("active");
-    btnHp.classList.remove("active");
-  }
-
-  if (triggerRecalc && currentParsedData) {
-    recalculateFields();
-  }
-}
-
-// -------------------------------------------------------------
-// 5. Dropzone setup
-// -------------------------------------------------------------
-function initDropzone() {
-  const dropzone = document.getElementById("dropzone");
-  const fileInput = document.getElementById("file-input");
-
-  dropzone.addEventListener("click", (e) => {
-    if (e.target.tagName !== "BUTTON") {
-      fileInput.click();
-    }
-  });
-
-  fileInput.addEventListener("change", (e) => {
-    if (e.target.files.length) {
-      uploadFile(e.target.files[0]);
-    }
-  });
-
-  dropzone.addEventListener("dragover", (e) => {
-    e.preventDefault();
-    dropzone.classList.add("dragover");
-  });
-
-  dropzone.addEventListener("dragleave", () => {
-    dropzone.classList.remove("dragover");
-  });
-
-  dropzone.addEventListener("drop", (e) => {
-    e.preventDefault();
-    dropzone.classList.remove("dragover");
-    if (e.dataTransfer.files.length) {
-      uploadFile(e.dataTransfer.files[0]);
-    }
-  });
-}
-
-// -------------------------------------------------------------
-// 6. Sample Loader
-// -------------------------------------------------------------
-async function loadSample(sampleName) {
-  const loading = document.getElementById("parse-loading");
-  loading.classList.remove("hidden");
 
   try {
-    const res = await fetch(`/api/sample/${sampleName}`);
-    if (!res.ok) throw new Error("Error cargando muestra");
-    const data = await res.json();
-    renderAnalysis(data);
-  } catch (err) {
-    alert("Error cargando muestra: " + err.message);
-  } finally {
-    loading.classList.add("hidden");
-  }
+    const g = await apiFetch("/api/v1/admin/gemini");
+    updateGeminiTopbar(g.gemini || {});
+  } catch (_) {}
+
+  await loadDashboard();
 }
 
-// -------------------------------------------------------------
-// 7. Upload & Parse File
-// -------------------------------------------------------------
-async function uploadFile(file) {
-  const loading = document.getElementById("parse-loading");
-  loading.classList.remove("hidden");
-
-  const formData = new FormData();
-  formData.append("file", file);
-
-  try {
-    const res = await fetch("/api/parse", {
-      method: "POST",
-      body: formData
-    });
-
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.detail || "Error al procesar el archivo");
-    }
-
-    const data = await res.json();
-    renderAnalysis(data);
-  } catch (e) {
-    alert("Error: " + e.message);
-  } finally {
-    loading.classList.add("hidden");
-  }
-}
-
-// -------------------------------------------------------------
-// 8. Render Extracted Analysis in UI
-// -------------------------------------------------------------
-function renderAnalysis(data) {
-  currentParsedData = data.parsed;
-  currentClassification = data.classification;
-  currentPreviewPayload = data.preview_payload;
-  currentIocs = [...(currentPreviewPayload.iocs || [])];
-  attachedEvidences = [];
-  renderEvidencesList();
-
-  // Auto-detect customer
-  const detectedCust = currentPreviewPayload.customer_key || "neubox";
-  setCustomer(detectedCust, false);
-
-  // Overview Card
-  document.getElementById("overview-card").classList.remove("hidden");
-  document.getElementById("lbl-ticket-id").textContent = `Ticket #${currentParsedData.ticket_id || "N/A"}`;
-  const lnkTicket = document.getElementById("lnk-ticket");
-  if (currentParsedData.ticket_url) {
-    lnkTicket.href = currentParsedData.ticket_url;
-    lnkTicket.classList.remove("hidden");
-  } else {
-    lnkTicket.classList.add("hidden");
-  }
-
-  document.getElementById("lbl-priority").textContent = currentParsedData.priority || "Normal";
-  document.getElementById("lbl-asset").textContent = currentParsedData.affected_asset || "No especificado";
-  document.getElementById("lbl-reporter").textContent = currentParsedData.reporter || "No especificado";
-  document.getElementById("lbl-server").textContent = currentParsedData.neubox_servers.join(", ") || "No detectado";
-  document.getElementById("lbl-ip").textContent = currentParsedData.primary_ip || "N/A";
-  document.getElementById("lbl-auth").textContent = currentParsedData.primary_account || "N/A";
-  document.getElementById("lbl-client-ticket").textContent = currentParsedData.client_ticket ? `#${currentParsedData.client_ticket}` : "N/A";
-  document.getElementById("lbl-summary").textContent = currentParsedData.brief_summary || "Sin resumen";
-
-  // Fill Quick Parameter Fields
-  document.getElementById("param-report-ticket").value = currentParsedData.ticket_id || "";
-  document.getElementById("param-client-ticket").value = currentParsedData.client_ticket || "";
-  document.getElementById("param-client-id").value = "";
-  document.getElementById("param-service-id").value = "";
-  document.getElementById("param-asset").value = currentParsedData.affected_asset || "";
-  document.getElementById("param-server").value = currentParsedData.primary_server || (currentParsedData.neubox_servers[0] || "");
-
-  // Activate Right Panel
-  document.getElementById("case-empty-state").classList.add("hidden");
-  document.getElementById("case-active-state").classList.remove("hidden");
-
-  // Template Selector
-  const select = document.getElementById("template-select");
-  select.value = currentClassification.template_name;
-
-  const confBadge = document.getElementById("confidence-badge");
-  const confPct = Math.round(currentClassification.confidence * 100);
-  confBadge.textContent = `${confPct}% Confianza`;
-
-  document.getElementById("reasons-text").textContent = `Criterios: ${currentClassification.reasons.join(", ")}`;
-
-  // Case Name & Summary
-  document.getElementById("case-name-input").value = currentPreviewPayload.case_name;
-  const descInput = document.getElementById("case-desc-input");
-  descInput.value = currentPreviewPayload.case_description;
-  // Reset preview for desc
-  const descPreview = document.getElementById("case-desc-preview");
-  descPreview.classList.add("hidden");
-  descInput.classList.remove("hidden");
-  document.getElementById("btn-toggle-desc").textContent = "👁️ Previsualizar Markdown";
-
-  // Render Tabs
-  renderEditableNotes(currentPreviewPayload.notes);
-  renderIocs(currentIocs);
-  renderAttributes(currentPreviewPayload.custom_attributes);
-  document.getElementById("raw-text-view").textContent = currentParsedData.raw_text;
-
-  document.getElementById("result-banner").classList.add("hidden");
-}
-
-function onTemplateChange() {
-  recalculateFields();
-}
-
-function onParamChange() {
-  // Update Case Name dynamically in real time
-  const tmpl = availableTemplates.find(t => t.name === document.getElementById("template-select").value);
-  const prefix = tmpl ? tmpl.prefix : "[ABUSE]";
-  const asset = document.getElementById("param-asset").value.trim();
-  const code = activeCustomer === "hospedando" ? "HP" : "NBX";
-
-  let num = "";
-  const clientTick = document.getElementById("param-client-ticket").value.trim();
-  const reportTick = document.getElementById("param-report-ticket").value.trim();
-
-  if (activeCustomer === "hospedando" && clientTick) {
-    num = clientTick;
-  } else if (reportTick) {
-    num = reportTick;
-  } else if (clientTick) {
-    num = clientTick;
-  } else {
-    num = "S/N";
-  }
-
-  const caseName = asset ? `${prefix} ${asset} | ${code}-${num}` : `${prefix} ${code}-${num}`;
-  document.getElementById("case-name-input").value = caseName;
-
-  // Sync with editable attributes inputs
-  document.querySelectorAll(".attr-field-input").forEach(input => {
-    const key = input.dataset.key;
-    if (key === "Ticket de abuso" && document.activeElement !== input) input.value = reportTick;
-    else if (key === "Dominio o activo reportado" && document.activeElement !== input) input.value = asset;
-    else if (key === "Ticket del titular" && document.activeElement !== input) input.value = clientTick;
-  });
-}
-
-// -------------------------------------------------------------
-// 9. Recalculate fields from server
-// -------------------------------------------------------------
-async function recalculateFields() {
-  if (!currentParsedData) return;
-
-  const reqData = {
-    parsed_data: currentParsedData,
-    template_name: document.getElementById("template-select").value,
-    overrides: {
-      customer_key: activeCustomer,
-      report_ticket: document.getElementById("param-report-ticket").value.trim(),
-      client_ticket: document.getElementById("param-client-ticket").value.trim(),
-      client_id: document.getElementById("param-client-id").value.trim(),
-      service_id: document.getElementById("param-service-id").value.trim(),
-      server: document.getElementById("param-server").value.trim(),
-      affected_asset: document.getElementById("param-asset").value.trim()
-    }
+function populateTaxonomySelects(cats) {
+  const fill = (id, list, valKey, labelKey) => {
+    const el = document.getElementById(id);
+    if (!el || !Array.isArray(list)) return;
+    el.innerHTML = list
+      .map((item) => `<option value="${esc(item[valKey])}">${esc(item[labelKey])}</option>`)
+      .join("");
   };
 
-  try {
-    const res = await fetch("/api/recalculate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(reqData)
-    });
-    const data = await res.json();
-    if (data.success) {
-      currentPreviewPayload = data.preview_payload;
-      document.getElementById("case-name-input").value = currentPreviewPayload.case_name;
-      document.getElementById("case-desc-input").value = currentPreviewPayload.case_description;
-      renderEditableNotes(currentPreviewPayload.notes);
-      renderAttributes(currentPreviewPayload.custom_attributes);
+  for (const prefix of ["triage", "ws", "mig"]) {
+    fill(`${prefix}Category`, cats.categories, "code", "name");
+    fill(`${prefix}CategoryCode`, cats.categories, "code", "name");
+    fill(`${prefix}ReportedActivity`, cats.reported_activities, "code", "label");
+    fill(`${prefix}RepAct`, cats.reported_activities, "code", "label");
+    fill(`${prefix}ConfirmedIncident`, cats.confirmed_incident_types, "code", "label");
+    fill(`${prefix}ConfInc`, cats.confirmed_incident_types, "code", "label");
+    fill(`${prefix}EntryVector`, cats.entry_vectors, "code", "label");
+    fill(`${prefix}Vector`, cats.entry_vectors, "code", "label");
+    fill(`${prefix}RootCause`, cats.root_causes, "code", "label");
+  }
+
+  fill("newActionType", cats.standard_actions, "code", "title");
+  fill("wsPlaybookSelect", cats.playbooks, "code", "name");
+}
+
+function updateGeminiTopbar(gCfg) {
+  const dot = document.getElementById("geminiStatusDot");
+  const txt = document.getElementById("geminiStatusText");
+  const hint = document.getElementById("adminGeminiKeyHint");
+  const wsModel = document.getElementById("wsGeminiModelBadge");
+
+  const model = gCfg.model || "gemini-2.5-flash";
+  const hasKey = gCfg.key_hint && gCfg.key_hint !== "No configurada";
+  if (wsModel) wsModel.textContent = model;
+  if (hint) hint.textContent = gCfg.key_hint || "No configurada";
+
+  if (dot && txt) {
+    if (gCfg.is_enabled && hasKey) {
+      dot.className = "dot online";
+      txt.textContent = `Gemini (${model})`;
+    } else {
+      dot.className = "dot warn";
+      txt.textContent = `Heurísticas SOC (Gemini sin API Key)`;
     }
+  }
+}
+
+// =========================================================
+// 1. DASHBOARD OPERATIVO
+// =========================================================
+async function loadDashboard() {
+  try {
+    const data = await apiFetch("/api/v1/dashboard/summary");
+    const k = data.kpis || {};
+    document.getElementById("kpiAlertsPending").textContent = k.alerts_pending ?? 0;
+    document.getElementById("kpiAlertsTotal").textContent = k.alerts_total ?? 0;
+    document.getElementById("kpiCasesOpen").textContent = k.cases_open ?? 0;
+    document.getElementById("kpiCasesProgress").textContent = k.cases_in_progress ?? 0;
+    document.getElementById("kpiCasesClosed").textContent = k.cases_closed ?? 0;
+    document.getElementById("kpiCasesMigrated").textContent = k.cases_migrated_v3 ?? 0;
+    document.getElementById("kpiCasesTotal").textContent = k.cases_total ?? 0;
+    document.getElementById("kpiCorrelated").textContent = k.alerts_correlated ?? 0;
+    document.getElementById("kpiEscalated").textContent = k.alerts_escalated ?? 0;
+    document.getElementById("kpiMerged").textContent = k.alerts_merged ?? 0;
+    document.getElementById("kpiRblActive").textContent = k.active_rbl_episodes ?? 0;
+
+    document.getElementById("navAlertsBadge").textContent = k.alerts_pending ?? 0;
+    document.getElementById("navCasesBadge").textContent = k.cases_open ?? 0;
+    document.getElementById("navMigrationBadge").textContent = k.cases_total ?? 20;
+
+    const irisConn = data.iris_connection || {};
+    const irisDot = document.getElementById("irisStatusDot");
+    const irisTxt = document.getElementById("irisStatusText");
+    if (irisDot && irisTxt) {
+      irisDot.className = irisConn.ok ? "dot online" : "dot err";
+      irisTxt.textContent = irisConn.ok
+        ? `DFIR-IRIS ${irisConn.iris_version || "v2.4.29"}`
+        : "DFIR-IRIS Desconectado";
+    }
+
+    // Distribuciones
+    const orgs = data.cases_by_organization || {};
+    const cats = data.cases_by_category || {};
+    const srcs = data.reports_by_source || {};
+    const catRows = Object.entries(cats)
+      .map(([cName, cnt]) => `<div style="display:flex; justify-content:space-between; padding:4px 0; border-bottom:1px solid rgba(148,163,184,0.08);"><span>${esc(cName)}</span><strong>${cnt}</strong></div>`)
+      .join("");
+    const srcRows = Object.entries(srcs)
+      .map(([sName, cnt]) => `<span class="badge badge-info" style="margin-right:6px;">${esc(sName)}: ${cnt}</span>`)
+      .join("") || `<span class="badge badge-neutral">Sin eventos en cola local aún</span>`;
+
+    document.getElementById("dashboardDistributions").innerHTML = `
+      <div style="display:flex; gap:12px; margin-bottom:12px;">
+        <div class="badge badge-nbx" style="padding:6px 12px; font-size:12.5px;">NEUBOX (NBX): ${orgs.NBX || 0} casos</div>
+        <div class="badge badge-hp" style="padding:6px 12px; font-size:12.5px;">Hospedando (HP): ${orgs.HP || 0} casos</div>
+      </div>
+      <div style="margin-bottom:10px;">${catRows}</div>
+      <div style="font-size:11.5px; color:var(--text-secondary);">Ingestas por canal: ${srcRows}</div>
+    `;
+
+    // Conectores
+    const connBody = document.getElementById("dashboardConnectorsBody");
+    connBody.innerHTML = (data.connectors || [])
+      .map(
+        (c) => `
+        <tr>
+          <td><strong>${esc(c.name)}</strong><br/><span style="font-size:11px; color:var(--text-muted);">${esc(c.type)}</span></td>
+          <td><span class="badge ${c.is_enabled ? "badge-ok" : "badge-neutral"}">${c.is_enabled ? "Activo (" + esc(c.status) + ")" : "Desactivado"}</span></td>
+          <td>${esc(c.last_sync_at, "Pendiente")}</td>
+        </tr>`
+      )
+      .join("");
+
+    // Auditoría reciente
+    const auditBody = document.getElementById("dashboardAuditBody");
+    const logs = data.recent_activity || [];
+    auditBody.innerHTML = logs.length
+      ? logs
+          .map(
+            (l) => `
+          <tr>
+            <td style="font-size:11.5px; color:var(--text-secondary);">${esc((l.timestamp || "").replace("T", " ").slice(0, 19))}</td>
+            <td><strong>${esc(l.username)}</strong></td>
+            <td><span class="badge badge-info">${esc(l.module)}</span></td>
+            <td><code>${esc(l.action)}</code></td>
+            <td>${l.iris_case_id ? "Caso #" + l.iris_case_id : l.iris_alert_id ? "Alerta #" + l.iris_alert_id : "—"}</td>
+            <td>${esc(l.details)}</td>
+          </tr>`
+          )
+          .join("")
+      : `<tr><td colspan="6" style="color:var(--text-muted);">Sin eventos registrados aún.</td></tr>`;
   } catch (e) {
-    console.error("Recalculate error", e);
+    showToast("Error cargando Dashboard: " + e.message);
   }
 }
 
-// -------------------------------------------------------------
-// 10. Switch Sub-Tabs in Case Panel
-// -------------------------------------------------------------
-function switchTab(tabId) {
-  document.querySelectorAll(".tabs-nav .tab-btn").forEach(btn => btn.classList.remove("active"));
-  document.querySelectorAll(".tab-panes .tab-pane").forEach(pane => pane.classList.remove("active"));
-
-  const targetPane = document.getElementById(`pane-${tabId}`);
-  if (targetPane) targetPane.classList.add("active");
-
-  const activeBtn = Array.from(document.querySelectorAll(".tabs-nav .tab-btn")).find(b => b.getAttribute("onclick").includes(tabId));
-  if (activeBtn) activeBtn.classList.add("active");
-}
-
-// -------------------------------------------------------------
-// 11. Render Notes with Markdown Live Preview
-// -------------------------------------------------------------
-function renderEditableNotes(notes) {
-  const container = document.getElementById("notes-accordion");
-  container.innerHTML = "";
-  allNotesInPreviewMode = false;
-  const toggleAllBtn = document.getElementById("btn-toggle-all-notes");
-  if (toggleAllBtn) toggleAllBtn.textContent = "👁️ Previsualizar Todas";
-
-  (notes || []).forEach((n, idx) => {
-    const item = document.createElement("div");
-    item.className = "note-item";
-    item.id = `note-item-${idx}`;
-
-    const header = document.createElement("div");
-    header.className = "note-header";
-    header.innerHTML = `
-      <span style="font-weight:600">${n.title}</span>
-      <div class="note-header-actions">
-        <button type="button" class="btn-note-toggle" id="btn-note-toggle-${idx}" onclick="toggleNoteMode(${idx})">
-          👁️ Vista Previa
-        </button>
-      </div>
-    `;
-
-    const textarea = document.createElement("textarea");
-    textarea.className = "editable-note-textarea";
-    textarea.id = `note-text-${idx}`;
-    textarea.dataset.title = n.title;
-    textarea.rows = 8;
-    textarea.value = n.content;
-
-    const previewDiv = document.createElement("div");
-    previewDiv.className = "rendered-note-view hidden";
-    previewDiv.id = `note-preview-${idx}`;
-    previewDiv.title = "Haz clic en 'Editar' para modificar este texto";
-
-    item.appendChild(header);
-    item.appendChild(textarea);
-    item.appendChild(previewDiv);
-    container.appendChild(item);
-  });
-}
-
-function toggleNoteMode(idx) {
-  const textarea = document.getElementById(`note-text-${idx}`);
-  const previewDiv = document.getElementById(`note-preview-${idx}`);
-  const toggleBtn = document.getElementById(`btn-note-toggle-${idx}`);
-
-  if (!textarea || !previewDiv) return;
-
-  const isPreview = !previewDiv.classList.contains("hidden");
-
-  if (isPreview) {
-    // Switch to edit mode
-    previewDiv.classList.add("hidden");
-    textarea.classList.remove("hidden");
-    toggleBtn.textContent = "👁️ Vista Previa";
-    toggleBtn.classList.remove("active");
-    textarea.focus();
-  } else {
-    // Switch to rendered preview mode
-    const mdText = textarea.value;
-    previewDiv.innerHTML = parseMarkdownSafe(mdText);
-    textarea.classList.add("hidden");
-    previewDiv.classList.remove("hidden");
-    toggleBtn.textContent = "✏️ Editar Markdown";
-    toggleBtn.classList.add("active");
-  }
-}
-
-function toggleAllNotesMode() {
-  allNotesInPreviewMode = !allNotesInPreviewMode;
-  const toggleAllBtn = document.getElementById("btn-toggle-all-notes");
-
-  document.querySelectorAll(".note-item").forEach((item, idx) => {
-    const textarea = document.getElementById(`note-text-${idx}`);
-    const previewDiv = document.getElementById(`note-preview-${idx}`);
-    const toggleBtn = document.getElementById(`btn-note-toggle-${idx}`);
-
-    if (allNotesInPreviewMode) {
-      previewDiv.innerHTML = parseMarkdownSafe(textarea.value);
-      textarea.classList.add("hidden");
-      previewDiv.classList.remove("hidden");
-      toggleBtn.textContent = "✏️ Editar";
-      toggleBtn.classList.add("active");
-    } else {
-      previewDiv.classList.add("hidden");
-      textarea.classList.remove("hidden");
-      toggleBtn.textContent = "👁️ Vista Previa";
-      toggleBtn.classList.remove("active");
-    }
-  });
-
-  toggleAllBtn.textContent = allNotesInPreviewMode ? "✏️ Editar Todas" : "👁️ Previsualizar Todas";
-}
-
-function toggleDescMode() {
-  const textarea = document.getElementById("case-desc-input");
-  const previewDiv = document.getElementById("case-desc-preview");
-  const toggleBtn = document.getElementById("btn-toggle-desc");
-
-  const isPreview = !previewDiv.classList.contains("hidden");
-
-  if (isPreview) {
-    previewDiv.classList.add("hidden");
-    textarea.classList.remove("hidden");
-    toggleBtn.textContent = "👁️ Previsualizar Markdown";
-    toggleBtn.classList.remove("active");
-    textarea.focus();
-  } else {
-    previewDiv.innerHTML = parseMarkdownSafe(textarea.value);
-    textarea.classList.add("hidden");
-    previewDiv.classList.remove("hidden");
-    toggleBtn.textContent = "✏️ Editar Markdown";
-    toggleBtn.classList.add("active");
-  }
-}
-
-// -------------------------------------------------------------
-// 12. Render IOCs with delete and toggle
-// -------------------------------------------------------------
-function renderIocs(iocs) {
-  const container = document.getElementById("iocs-list");
-  const countBadge = document.getElementById("iocs-count");
-  container.innerHTML = "";
-  countBadge.textContent = (iocs || []).length;
-
-  if (!iocs || !iocs.length) {
-    container.innerHTML = "<p class='pane-hint'>No se detectaron IOCs automáticamente en el ticket.</p>";
-    return;
-  }
-
-  iocs.forEach((ioc, idx) => {
-    const row = document.createElement("div");
-    row.className = "ioc-row";
-    row.id = `ioc-row-${idx}`;
-
-    const chk = document.createElement("input");
-    chk.type = "checkbox";
-    chk.id = `ioc-chk-${idx}`;
-    chk.checked = true;
-    chk.dataset.idx = idx;
-
-    const badge = document.createElement("span");
-    badge.className = `ioc-badge ${ioc.type}`;
-    badge.textContent = ioc.type;
-
-    const val = document.createElement("span");
-    val.className = "ioc-val";
-    val.textContent = ioc.value;
-
-    const btnDel = document.createElement("button");
-    btnDel.type = "button";
-    btnDel.className = "btn-del-ioc";
-    btnDel.innerHTML = "✕";
-    btnDel.title = "Eliminar este indicador";
-    btnDel.onclick = () => removeIoc(idx);
-
-    row.appendChild(chk);
-    row.appendChild(badge);
-    row.appendChild(val);
-    row.appendChild(btnDel);
-    container.appendChild(row);
-  });
-}
-
-function removeIoc(idx) {
-  currentIocs.splice(idx, 1);
-  renderIocs(currentIocs);
-}
-
-function promptAddIoc() {
-  const type = prompt("Tipo de IOC (domain, ip, url, email):", "domain");
-  if (!type) return;
-  const value = prompt("Valor del IOC:", "");
-  if (!value) return;
-
-  currentIocs.push({
-    type: type.trim().toLowerCase(),
-    value: value.trim(),
-    description: "Agregado manualmente por el analista"
-  });
-  renderIocs(currentIocs);
-}
-
-// -------------------------------------------------------------
-// 13. Render Editable Custom Attributes
-// -------------------------------------------------------------
-function renderAttributes(attrs) {
-  const container = document.getElementById("attributes-preview");
-  container.innerHTML = "";
-
-  const section = (attrs && attrs["01 Identificación"]) || {};
-
-  // Standard official keys in 01 Identificación
-  const defaultKeys = [
-    "Ticket de abuso",
-    "Dominio o activo reportado",
-    "IP reportada",
-    "Ticket del titular"
-  ];
-
-  const allEntries = { ...section };
-  defaultKeys.forEach(k => {
-    if (!(k in allEntries)) allEntries[k] = "";
-  });
-
-  let idx = 0;
-  for (const [key, val] of Object.entries(allEntries)) {
-    const row = document.createElement("div");
-    row.className = "attr-row-editable";
-    row.id = `attr-row-${idx}`;
-
-    row.innerHTML = `
-      <div class="attr-label-col">
-        <label for="attr-input-${idx}">
-          ${key}:
-        </label>
-      </div>
-      <div class="attr-input-col">
-        <input 
-          type="text" 
-          id="attr-input-${idx}" 
-          class="attr-field-input" 
-          data-category="01 Identificación" 
-          data-key="${key}" 
-          value="${val || ''}" 
-          placeholder="(vacío)"
-          oninput="onAttributeFieldChange('${key}', this.value)"
-        >
-      </div>
-    `;
-    container.appendChild(row);
-    idx++;
-  }
-}
-
-function onAttributeFieldChange(key, value) {
-  const val = value.trim();
-
-  // 1. Sync with quick parameters if corresponding
-  if (key === "Ticket de abuso") {
-    const param = document.getElementById("param-report-ticket");
-    if (param && param.value !== val) {
-      param.value = val;
-      onParamChange();
-    }
-  } else if (key === "Dominio o activo reportado") {
-    const param = document.getElementById("param-asset");
-    if (param && param.value !== val) {
-      param.value = val;
-      onParamChange();
-    }
-  } else if (key === "Ticket del titular") {
-    const param = document.getElementById("param-client-ticket");
-    if (param && param.value !== val) {
-      param.value = val;
-      onParamChange();
-    }
-  }
-
-  // 2. Update currentPreviewPayload
-  if (currentPreviewPayload) {
-    if (!currentPreviewPayload.custom_attributes) {
-      currentPreviewPayload.custom_attributes = { "01 Identificación": {} };
-    }
-    if (!currentPreviewPayload.custom_attributes["01 Identificación"]) {
-      currentPreviewPayload.custom_attributes["01 Identificación"] = {};
-    }
-    currentPreviewPayload.custom_attributes["01 Identificación"][key] = val;
-  }
-}
-
-function promptAddCustomAttribute() {
-  const name = prompt("Nombre del nuevo atributo (ej. IP Secundaria, Ticket Proveedor):", "");
-  if (!name || !name.trim()) return;
-  const val = prompt(`Valor para '${name.trim()}':`, "");
-
-  if (!currentPreviewPayload) currentPreviewPayload = {};
-  if (!currentPreviewPayload.custom_attributes) currentPreviewPayload.custom_attributes = { "01 Identificación": {} };
-  if (!currentPreviewPayload.custom_attributes["01 Identificación"]) currentPreviewPayload.custom_attributes["01 Identificación"] = {};
-
-  currentPreviewPayload.custom_attributes["01 Identificación"][name.trim()] = (val || "").trim();
-  renderAttributes(currentPreviewPayload.custom_attributes);
-}
-
-// -------------------------------------------------------------
-// 14. Submit Case Creation
-// -------------------------------------------------------------
-async function submitCase(isDryRun) {
-  if (!currentParsedData) return;
-
-  const btnDry = document.getElementById("btn-dry-run");
-  const btnReal = document.getElementById("btn-create-real");
-  const resultBanner = document.getElementById("result-banner");
-
-  btnDry.disabled = true;
-  btnReal.disabled = true;
-  resultBanner.className = "result-banner hidden";
-
-  // Gather edited notes (read textarea value regardless of mode)
-  const editedNotes = [];
-  document.querySelectorAll(".editable-note-textarea").forEach(ta => {
-    editedNotes.push({
-      title: ta.dataset.title,
-      content: ta.value
-    });
-  });
-
-  // Gather selected IOCs
-  const selectedIocs = [];
-  document.querySelectorAll("#iocs-list input[type='checkbox']:checked").forEach(chk => {
-    const idx = parseInt(chk.dataset.idx, 10);
-    if (!isNaN(idx) && currentIocs[idx]) {
-      selectedIocs.push(currentIocs[idx]);
-    }
-  });
-
-  // Gather editable custom attributes
-  const customAttrs = { "01 Identificación": {} };
-  document.querySelectorAll(".attr-field-input").forEach(input => {
-    const cat = input.dataset.category || "01 Identificación";
-    const key = input.dataset.key;
-    if (!customAttrs[cat]) customAttrs[cat] = {};
-    customAttrs[cat][key] = input.value.trim();
-  });
-
-  const reqPayload = {
-    parsed_data: currentParsedData,
-    template_name: document.getElementById("template-select").value,
-    overrides: {
-      customer_key: activeCustomer,
-      report_ticket: document.getElementById("param-report-ticket").value.trim(),
-      client_ticket: document.getElementById("param-client-ticket").value.trim(),
-      client_id: document.getElementById("param-client-id").value.trim(),
-      service_id: document.getElementById("param-service-id").value.trim(),
-      server: document.getElementById("param-server").value.trim(),
-      affected_asset: document.getElementById("param-asset").value.trim(),
-      case_name: document.getElementById("case-name-input").value.trim(),
-      case_description: document.getElementById("case-desc-input").value.trim(),
-      notes: editedNotes,
-      selected_iocs: selectedIocs,
-      custom_attributes: customAttrs
-    },
-    evidence_tokens: attachedEvidences.map(e => e.token),
-    dry_run: isDryRun
-  };
+// =========================================================
+// 2. CENTRO DE ALERTAS & TRIAGE
+// =========================================================
+async function loadAlerts() {
+  const tbody = document.getElementById("alertsTableBody");
+  if (!tbody) return;
+  const search = (document.getElementById("alertSearchInput")?.value || "").trim();
+  const params = new URLSearchParams();
+  if (SOC_STATE.globalOrg) params.set("organization", SOC_STATE.globalOrg);
+  if (search) params.set("search", search);
 
   try {
-    const res = await fetch("/api/create", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(reqPayload)
-    });
-
-    const data = await res.json();
-
-    if (data.success) {
-      if (isDryRun) {
-        resultBanner.className = "result-banner dry-run";
-        resultBanner.innerHTML = `
-          <div>
-            <strong>✓ Simulación Exitosa:</strong> Caso '${data.case_name}' validado con template '${data.template_applied}'.
-          </div>
-          <span style="font-family:var(--font-mono);font-size:0.8rem">Payload verificado (${selectedIocs.length} IOCs, ${editedNotes.length} Notas)</span>
-        `;
-      } else {
-        resultBanner.className = "result-banner success";
-        resultBanner.innerHTML = `
-          <div>
-            <strong>✓ Caso Creado en DFIR-IRIS (ID: ${data.case_id}):</strong> ${data.case_name}
-          </div>
-          <a href="${data.case_url}" target="_blank" class="result-link">Abrir en DFIR-IRIS ↗</a>
-        `;
-      }
-      loadHistory();
-      loadIrisCases(false);
-    } else {
-      resultBanner.className = "result-banner error";
-      resultBanner.innerHTML = `<strong>✗ Error:</strong> ${data.error || "No se pudo crear el caso en IRIS"}`;
-    }
-  } catch (err) {
-    resultBanner.className = "result-banner error";
-    resultBanner.innerHTML = `<strong>✗ Error de red:</strong> ${err.message}`;
-  } finally {
-    btnDry.disabled = false;
-    btnReal.disabled = false;
-  }
-}
-
-// -------------------------------------------------------------
-// 15. History Table (Session created cases)
-// -------------------------------------------------------------
-async function loadHistory() {
-  try {
-    const res = await fetch("/api/history");
-    const data = await res.json();
-    const history = data.history || [];
-
-    const tbody = document.getElementById("history-tbody");
-    const countBadge = document.getElementById("history-count");
-    countBadge.textContent = `${history.length} casos`;
-
-    if (!history.length) {
-      tbody.innerHTML = '<tr class="empty-row"><td colspan="6">No se han creado casos en esta sesión aún.</td></tr>';
+    const data = await apiFetch(`/api/v1/alerts?${params.toString()}`);
+    const list = data.alerts || [];
+    if (!list.length) {
+      tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; padding:22px; color:var(--text-secondary);">No hay alertas en la cola de DFIR-IRIS con los filtros actuales. Usa <strong>Ingesta Multicanal</strong> para crear una alerta de prueba desde los PDFs reales.</td></tr>`;
       return;
     }
-
-    tbody.innerHTML = "";
-    history.forEach(item => {
-      const tr = document.createElement("tr");
-      const modeBadge = item.dry_run 
-        ? '<span style="color:var(--accent-amber);font-size:0.75rem;font-weight:600">DRY-RUN</span>' 
-        : '<span style="color:var(--accent-green);font-size:0.75rem;font-weight:600">PROD</span>';
-
-      tr.innerHTML = `
-        <td><span style="font-weight:600;color:var(--accent-cyan)">${item.customer || 'Neubox'}</span></td>
-        <td style="font-family:var(--font-mono)">${item.ticket_id || 'N/A'}</td>
-        <td style="font-weight:600">${item.case_name}</td>
-        <td><span style="font-family:var(--font-mono);font-size:0.8rem">${item.template}</span></td>
-        <td>${modeBadge}</td>
-        <td><a href="${item.case_url}" target="_blank">Caso #${item.case_id} ↗</a></td>
-      `;
-      tbody.appendChild(tr);
-    });
+    tbody.innerHTML = list
+      .map(
+        (a) => `
+        <tr>
+          <td><strong>#${a.alert_id}</strong></td>
+          <td>${orgBadge(a.organization)}</td>
+          <td>
+            <strong>${esc(a.alert_title)}</strong>
+            <div style="font-size:11px; color:var(--text-secondary);">Fuente: ${esc(a.alert_source)} | Ref: ${esc(a.abuse_ticket_id)} | IOCs: ${a.iocs_count}</div>
+          </td>
+          <td><code>${esc(a.reported_activity)}</code></td>
+          <td><span class="badge badge-purple">${esc(a.confirmed_incident_type)}</span></td>
+          <td><span class="badge ${a.severity_name === "High" || a.severity_name === "Critical" ? "badge-high" : "badge-medium"}">${esc(a.severity_name)}</span></td>
+          <td><span class="badge badge-info">${esc(a.status_name)}</span></td>
+          <td>
+            <button class="btn btn-primary btn-sm" onclick="openAlertTriage(${a.alert_id})">🔍 Abrir Triage</button>
+          </td>
+        </tr>`
+      )
+      .join("");
   } catch (e) {
-    console.error("Error loading history", e);
+    tbody.innerHTML = `<tr><td colspan="8" style="color:var(--status-danger);">Error consultando cola de alertas IRIS: ${esc(e.message)}</td></tr>`;
   }
 }
 
-// -------------------------------------------------------------
-// 16. DFIR-IRIS Live Cases Management Panel
-// -------------------------------------------------------------
-async function loadIrisCases(showSpinner = false) {
-  const loading = document.getElementById("cases-loading");
-  if (showSpinner && loading) loading.classList.remove("hidden");
-
+async function openAlertTriage(alertId) {
+  SOC_STATE.activeAlertId = alertId;
   try {
-    const res = await fetch(`/api/cases?state=${currentCasesFilterState}`);
-    const data = await res.json();
-    loadedIrisCases = data.cases || [];
+    const data = await apiFetch(`/api/v1/alerts/${alertId}`);
+    const ia = data.iris_alert || {};
+    const ext = data.extension || {};
+    const ing = data.ingest_event || {};
+    const prov = ext.field_provenance || {};
 
-    // Update open counter badge in navigation tab
-    const openCases = loadedIrisCases.filter(c => !c.is_closed);
-    const badge = document.getElementById("open-cases-badge");
-    if (badge) badge.textContent = `${openCases.length}`;
+    document.getElementById("alertDetailDrawer").style.display = "block";
+    document.getElementById("triageAlertTitle").textContent = `Alerta #${alertId}: ${ia.alert_title || ""}`;
+    document.getElementById("triageAlertSourceBadge").textContent = `${ia.alert_source || "SOC"} · Estado: ${(ia.status || {}).status_name || "New"}`;
 
-    renderCasesTable(loadedIrisCases);
-  } catch (err) {
-    console.error("Error loading cases from IRIS", err);
-  } finally {
-    if (loading) loading.classList.add("hidden");
-  }
-}
+    document.getElementById("triageEvidenceMeta").innerHTML = ing && ing.evidence_sha256
+      ? `<strong>SHA-256 Paquete Inicial:</strong> <code>${esc(ing.evidence_sha256)}</code><br/><strong>Ruta Custodia:</strong> <code>${esc(ing.evidence_package_path)}</code>`
+      : `Alerta nativa de DFIR-IRIS (Ref: ${esc(ia.alert_source_ref)})`;
 
-function filterCasesState(state) {
-  currentCasesFilterState = state;
-  const btnOpen = document.getElementById("btn-filter-open");
-  const btnAll = document.getElementById("btn-filter-all");
+    document.getElementById("triageOriginalContentBox").textContent =
+      (ing && ing.original_content) || ia.alert_description || "Sin contenido original.";
 
-  if (state === "open") {
-    btnOpen.classList.add("active");
-    btnAll.classList.remove("active");
-  } else {
-    btnAll.classList.add("active");
-    btnOpen.classList.remove("active");
-  }
-
-  loadIrisCases(true);
-}
-
-function filterCasesCustomer(cust) {
-  currentCasesFilterCust = cust;
-  document.querySelectorAll(".customer-filter-chips .btn-chip").forEach(c => c.classList.remove("active"));
-  const activeChip = document.getElementById(`chip-cust-${cust === 'neubox' ? 'nbx' : cust === 'hospedando' ? 'hp' : 'all'}`);
-  if (activeChip) activeChip.classList.add("active");
-
-  onCasesSearch();
-}
-
-function onCasesSearch() {
-  const query = (document.getElementById("cases-search-input").value || "").trim().toLowerCase();
-  let filtered = [...loadedIrisCases];
-
-  if (currentCasesFilterCust !== "all") {
-    filtered = filtered.filter(c => 
-      c.customer_name.toLowerCase().includes(currentCasesFilterCust) ||
-      c.customer_code.toLowerCase().includes(currentCasesFilterCust)
+    document.getElementById("triageIndicatorsByRole").textContent = JSON.stringify(
+      ext.indicators_by_role || ia.iocs || {},
+      null,
+      2
     );
-  }
 
-  if (query) {
-    filtered = filtered.filter(c => 
-      String(c.case_id).includes(query) ||
-      (c.case_name || "").toLowerCase().includes(query) ||
-      (c.description || "").toLowerCase().includes(query) ||
-      (c.soc_id || "").toLowerCase().includes(query)
-    );
-  }
+    document.getElementById("triageOrg").value = ext.organization || "NBX";
+    document.getElementById("triageTicket").value = ext.abuse_ticket_id || "";
+    document.getElementById("triageDomain").value = ext.primary_domain || "";
+    document.getElementById("triageHostingIp").value = ext.hosting_ip || "";
+    document.getElementById("triageReportedIp").value = ext.reported_ip || "";
+    document.getElementById("triageServer").value = ext.server_name || "";
+    document.getElementById("triageCategory").value = ext.category_code || "abuse_phishing";
+    document.getElementById("triageReportedActivity").value = ext.reported_activity || "unknown";
+    document.getElementById("triageConfirmedIncident").value = ext.confirmed_incident_type || "pending_investigation";
+    document.getElementById("triageEntryVector").value = ext.entry_vector || "unknown";
+    document.getElementById("triageRootCause").value = ext.root_cause || "unknown";
+    document.getElementById("triageSeverity").value = ext.severity || "Medium";
 
-  renderCasesTable(filtered);
+    for (const k of [
+      "organization",
+      "abuse_ticket_id",
+      "primary_domain",
+      "hosting_ip",
+      "reported_ip",
+      "server_name",
+      "category_code",
+      "reported_activity",
+      "confirmed_incident_type",
+      "entry_vector",
+      "root_cause",
+      "severity",
+    ]) {
+      const pEl = document.getElementById(`prov_${k}`);
+      if (pEl) {
+        const pVal = (prov[k] || "rule").toLowerCase();
+        pEl.className = `prov-tag prov-${pVal === "manual" ? "manual" : pVal === "ai" ? "ai" : "rule"}`;
+        pEl.textContent = pVal.toUpperCase();
+      }
+    }
+
+    const heurSignals = (ext.heuristic_result || {}).signals || [];
+    const gemUsed = (ext.gemini_result || {}).ai_used;
+    const corrCases = ext.correlated_case_ids || [];
+    document.getElementById("triageComparisonSignals").textContent =
+      `• Señales Heurísticas: ${heurSignals.join(" | ") || "N/A"}\n` +
+      `• Enriquecimiento Gemini: ${gemUsed ? "Activo (" + (ext.gemini_result.model || "") + ")" : "Fallback determinista"}\n` +
+      `• Casos Correlacionados en IRIS: ${corrCases.length ? corrCases.map((c) => "#" + c).join(", ") : "Ninguno"}`;
+  } catch (e) {
+    showToast("Error abriendo alerta: " + e.message);
+  }
 }
 
-function renderCasesTable(cases) {
-  const tbody = document.getElementById("iris-cases-tbody");
-  if (!tbody) return;
+async function saveAlertTriageChanges() {
+  if (!SOC_STATE.activeAlertId) return;
+  try {
+    const body = {
+      organization: document.getElementById("triageOrg").value,
+      abuse_ticket_id: document.getElementById("triageTicket").value,
+      primary_domain: document.getElementById("triageDomain").value,
+      hosting_ip: document.getElementById("triageHostingIp").value,
+      reported_ip: document.getElementById("triageReportedIp").value,
+      server_name: document.getElementById("triageServer").value,
+      category_code: document.getElementById("triageCategory").value,
+      reported_activity: document.getElementById("triageReportedActivity").value,
+      confirmed_incident_type: document.getElementById("triageConfirmedIncident").value,
+      entry_vector: document.getElementById("triageEntryVector").value,
+      root_cause: document.getElementById("triageRootCause").value,
+      severity: document.getElementById("triageSeverity").value,
+    };
+    await apiFetch(`/api/v1/alerts/${SOC_STATE.activeAlertId}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+    showToast("Cambios de triage guardados en Alerta #" + SOC_STATE.activeAlertId + " (marcados como MANUAL)");
+    await openAlertTriage(SOC_STATE.activeAlertId);
+    await loadAlerts();
+  } catch (e) {
+    showToast("Error guardando triage: " + e.message);
+  }
+}
 
-  if (!cases || !cases.length) {
-    tbody.innerHTML = '<tr class="empty-row"><td colspan="6">No se encontraron casos en DFIR-IRIS que coincidan con el filtro.</td></tr>';
+async function escalateCurrentAlert() {
+  if (!SOC_STATE.activeAlertId) return;
+  try {
+    const res = await apiFetch(`/api/v1/alerts/${SOC_STATE.activeAlertId}/escalate`, {
+      method: "POST",
+      body: JSON.stringify({ note: "Alerta escalada desde Centro de Alertas SOC v3.0" }),
+    });
+    showToast(`Alerta #${SOC_STATE.activeAlertId} convertida en Caso IRIS #${res.case_id}`);
+    document.getElementById("alertDetailDrawer").style.display = "none";
+    await openCaseWorkspace(res.case_id);
+  } catch (e) {
+    showToast("Error escalando alerta: " + e.message);
+  }
+}
+
+async function promptMergeCurrentAlert() {
+  if (!SOC_STATE.activeAlertId) return;
+  const cidStr = prompt("Ingresa el ID del Caso existente en DFIR-IRIS con el que deseas relacionar/fusionar esta alerta:");
+  if (!cidStr || isNaN(parseInt(cidStr, 10))) return;
+  try {
+    await apiFetch(`/api/v1/alerts/${SOC_STATE.activeAlertId}/merge`, {
+      method: "POST",
+      body: JSON.stringify({ target_case_id: parseInt(cidStr, 10) }),
+    });
+    showToast(`Alerta #${SOC_STATE.activeAlertId} fusionada con el Caso #${cidStr}`);
+    await loadAlerts();
+  } catch (e) {
+    showToast("Error fusionando alerta: " + e.message);
+  }
+}
+
+async function promptDiscardCurrentAlert() {
+  if (!SOC_STATE.activeAlertId) return;
+  const reason = prompt("Ingresa el motivo obligatorio de descarte de la alerta (mín. 5 caracteres):");
+  if (!reason || reason.trim().length < 5) {
+    showToast("Debes especificar un motivo obligatorio de al menos 5 caracteres.");
     return;
   }
-
-  tbody.innerHTML = "";
-  cases.forEach(c => {
-    const tr = document.createElement("tr");
-
-    // State badge style
-    let stateClass = "state-progress";
-    if (c.is_closed || c.state_id === 9) stateClass = "state-closed";
-    else if (c.state_id === 3) stateClass = "state-open";
-    else if (c.state_id === 4 || c.state_id === 5) stateClass = "state-containment";
-
-    // Customer code badge style
-    const custColor = c.customer_code === "HP" ? "var(--accent-purple)" : "var(--accent-cyan)";
-
-    tr.innerHTML = `
-      <td style="font-family:var(--font-mono);font-weight:600">#${c.case_id}</td>
-      <td>
-        <span style="font-weight:700;color:${custColor}">${c.customer_code}</span>
-        <span style="font-size:0.75rem;color:var(--text-dim);display:block">${c.customer_name}</span>
-      </td>
-      <td>
-        <strong style="color:#fff;display:block;font-size:0.9rem">${c.case_name}</strong>
-      </td>
-      <td>
-        <span class="state-badge ${stateClass}">${c.state_name || 'En curso'}</span>
-      </td>
-      <td style="font-size:0.8rem;color:var(--text-muted)">
-        ${c.open_date || 'N/A'}
-      </td>
-      <td>
-        <div class="btn-action-group">
-          <a href="${c.case_url}" target="_blank" class="btn-action" title="Abrir caso en interfaz DFIR-IRIS">
-            🌐 IRIS ↗
-          </a>
-          <button type="button" class="btn-action btn-action-report" onclick="openReportModal(${c.case_id})" title="Generar informe en Markdown y exportar a PDF">
-            📄 Reporte
-          </button>
-          <button type="button" class="btn-action" onclick="openEditModal(${c.case_id})" title="Editar título, descripción o estado">
-            ✏️ Editar
-          </button>
-          ${!c.is_closed ? `
-            <button type="button" class="btn-action btn-action-close" onclick="closeCasePrompt(${c.case_id}, '${c.case_name.replace(/'/g, "\\'")}')" title="Cerrar caso">
-              🔒 Cerrar
-            </button>
-          ` : ''}
-        </div>
-      </td>
-    `;
-    tbody.appendChild(tr);
-  });
-}
-
-// -------------------------------------------------------------
-// 17. Close Case Prompt
-// -------------------------------------------------------------
-async function closeCasePrompt(caseId, caseName) {
-  const ok = confirm(`¿Estás seguro de cerrar el Caso #${caseId} en DFIR-IRIS?\n\n"${caseName}"`);
-  if (!ok) return;
-
   try {
-    const res = await fetch(`/api/cases/${caseId}/close`, { method: "POST" });
-    const data = await res.json();
-    if (res.ok && data.success) {
-      alert(`✓ Caso #${caseId} cerrado exitosamente.`);
-      loadIrisCases(true);
-    } else {
-      alert(`Error al cerrar caso: ${data.detail || data.error}`);
-    }
-  } catch (err) {
-    alert("Error de red cerrando caso: " + err.message);
-  }
-}
-
-// -------------------------------------------------------------
-// 18. Report Generator Modal & PDF Export
-// -------------------------------------------------------------
-async function openReportModal(caseId) {
-  activeReportCaseId = caseId;
-  const modal = document.getElementById("modal-report");
-  const title = document.getElementById("modal-report-title");
-  const paper = document.getElementById("report-rendered-paper");
-  const editor = document.getElementById("report-markdown-editor");
-  const statusHint = document.getElementById("report-modal-status");
-
-  title.textContent = `Informe de Incidente — Caso #${caseId}`;
-  paper.innerHTML = "<p><em>Cargando y renderizando reporte desde DFIR-IRIS...</em></p>";
-  editor.value = "Cargando...";
-  statusHint.textContent = "Obteniendo datos...";
-  modal.classList.remove("hidden");
-
-  // Default to Preview Tab
-  switchReportTab("preview");
-
-  try {
-    const res = await fetch(`/api/cases/${caseId}/report`);
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.detail || "Error generando reporte");
-    }
-
-    const data = await res.json();
-    activeReportCaseData = data;
-
-    title.textContent = `Informe de Incidente — Caso #${caseId} (${data.customer_name})`;
-    document.getElementById("modal-report-subtitle").textContent = `Plantilla: ${data.template || 'Report_Template_Abuse_Lite.md'} | ${data.case_name}`;
-
-    editor.value = data.markdown;
-    paper.innerHTML = data.html || parseMarkdownSafe(data.markdown);
-    statusHint.textContent = "Reporte renderizado listo para exportar a PDF";
+    await apiFetch(`/api/v1/alerts/${SOC_STATE.activeAlertId}/discard`, {
+      method: "POST",
+      body: JSON.stringify({ discard_reason: reason.trim() }),
+    });
+    showToast(`Alerta #${SOC_STATE.activeAlertId} descartada y cerrada en DFIR-IRIS.`);
+    document.getElementById("alertDetailDrawer").style.display = "none";
+    await loadAlerts();
   } catch (e) {
-    paper.innerHTML = `<p style="color:#ef4444"><strong>Error:</strong> ${e.message}</p>`;
-    statusHint.textContent = "Error al generar";
+    showToast("Error descartando alerta: " + e.message);
   }
 }
 
-function closeReportModal() {
-  document.getElementById("modal-report").classList.add("hidden");
-  const paper = document.getElementById("report-rendered-paper");
-  if (paper) paper.innerHTML = "";
-  activeReportCaseId = null;
-  activeReportCaseData = null;
-}
+// =========================================================
+// 3. MOTOR DE INGESTA MULTICANAL
+// =========================================================
+async function handleFileUpload(ev) {
+  const file = ev.target.files?.[0];
+  if (!file) return;
+  const org = document.getElementById("ingestOrgSelect").value;
+  const createAlert = document.getElementById("ingestModeSelect").value === "alert";
+  const useGem = document.getElementById("ingestGeminiToggle").value === "true";
 
-function switchReportTab(tab) {
-  const btnPrev = document.getElementById("btn-report-view-preview");
-  const btnEdit = document.getElementById("btn-report-view-edit");
-  const panePrev = document.getElementById("report-pane-preview");
-  const paneEdit = document.getElementById("report-pane-edit");
+  const fd = new FormData();
+  fd.append("file", file);
+  if (org) fd.append("organization", org);
+  fd.append("create_iris_alert", String(createAlert));
+  fd.append("use_gemini", String(useGem));
 
-  if (tab === "edit") {
-    btnEdit.classList.add("active");
-    btnPrev.classList.remove("active");
-    paneEdit.classList.add("active");
-    panePrev.classList.remove("active");
-  } else {
-    btnPrev.classList.add("active");
-    btnEdit.classList.remove("active");
-    panePrev.classList.add("active");
-    paneEdit.classList.remove("active");
+  document.getElementById("ingestResultStatusBadge").textContent = "Procesando...";
+  try {
+    const res = await apiFetch("/api/v1/ingest/upload", { method: "POST", body: fd });
+    renderIngestOutput(res);
+    showToast(
+      res.iris_alert_id
+        ? `Alerta #${res.iris_alert_id} creada en DFIR-IRIS con paquete SHA-256`
+        : "Previsualización de normalización completada (Dry-Run)"
+    );
+  } catch (e) {
+    showToast("Error procesando archivo: " + e.message);
+  } finally {
+    ev.target.value = "";
   }
 }
 
-function onReportMarkdownEdit() {
-  const editor = document.getElementById("report-markdown-editor");
-  const paper = document.getElementById("report-rendered-paper");
-  
-  const custName = activeReportCaseData ? activeReportCaseData.customer_name : "Neubox";
-  const custCode = activeReportCaseData ? activeReportCaseData.customer_code : "NBX";
-  const badgeColor = custCode === "NBX" ? "#3b82f6" : "#8b5cf6";
-  const badgeBg = custCode === "NBX" ? "#eff6ff" : "#f5f3ff";
+async function handleTextIngest() {
+  const text = (document.getElementById("ingestRawText")?.value || "").trim();
+  if (text.length < 5) {
+    showToast("Pega primero el contenido del reporte o correo.");
+    return;
+  }
+  const org = document.getElementById("ingestOrgSelect").value || "NBX";
+  const createAlert = document.getElementById("ingestModeSelect").value === "alert";
+  const useGem = document.getElementById("ingestGeminiToggle").value === "true";
 
-  const renderedContent = parseMarkdownSafe(editor.value);
-  paper.innerHTML = `
-    <div class="report-banner" style="border-bottom: 2px solid ${badgeColor};">
-      <div class="banner-title-group">
-        <span class="org-badge" style="color: ${badgeColor}; background: ${badgeBg}; border: 1px solid ${badgeColor};">
-          SOC ${custName.toUpperCase()} &bull; ${custCode}
-        </span>
-        <h1 class="banner-heading">DFIR-IRIS Abuse Incident Report</h1>
+  document.getElementById("ingestResultStatusBadge").textContent = "Procesando...";
+  try {
+    const res = await apiFetch("/api/v1/ingest/text", {
+      method: "POST",
+      body: JSON.stringify({
+        text,
+        organization: org,
+        create_iris_alert: createAlert,
+        use_gemini: useGem,
+      }),
+    });
+    renderIngestOutput(res);
+    showToast(res.iris_alert_id ? `Alerta #${res.iris_alert_id} creada en DFIR-IRIS` : "Texto normalizado en Dry-Run");
+  } catch (e) {
+    showToast("Error en ingesta de texto: " + e.message);
+  }
+}
+
+async function runReferenceSample(sampleKey) {
+  const createAlert = document.getElementById("ingestModeSelect").value === "alert";
+  document.getElementById("ingestResultStatusBadge").textContent = `Analizando ticket #${sampleKey}...`;
+  try {
+    const res = await apiFetch(`/api/v1/ingest/sample/${sampleKey}?create_iris_alert=${createAlert}`);
+    renderIngestOutput(res);
+    showToast(`Ticket de referencia #${sampleKey} procesado correctamente.`);
+  } catch (e) {
+    showToast("Error cargando muestra: " + e.message);
+  }
+}
+
+function renderIngestOutput(res) {
+  const norm = res.normalized || {};
+  const heur = res.heuristics || {};
+  const pkg = res.evidence_package || {};
+  const corr = res.correlations || {};
+
+  document.getElementById("ingestResultStatusBadge").textContent = res.iris_alert_id
+    ? `Alerta IRIS #${res.iris_alert_id}`
+    : "Dry-Run Normalizado";
+
+  const alertActionBtn = res.iris_alert_id
+    ? `<button class="btn btn-primary btn-sm" onclick="switchView('alerts'); openAlertTriage(${res.iris_alert_id})">🚨 Abrir Alerta #${res.iris_alert_id} en Triage →</button>`
+    : "";
+
+  document.getElementById("ingestPipelineOutput").innerHTML = `
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+      <div>${orgBadge(res.organization)} <strong style="margin-left:6px;">${esc(res.alert_title)}</strong></div>
+      ${alertActionBtn}
+    </div>
+    <div class="form-grid-3" style="margin-bottom:10px;">
+      <div class="kpi-card" style="padding:9px;">
+        <div class="kpi-label">Activo / Dominio</div>
+        <div style="font-weight:700; margin-top:2px;">${esc(norm.primary_domain)}</div>
+        <div class="kpi-sub">Marca ref: ${esc(norm.impersonated_brand, "Ninguna")}</div>
       </div>
-      <div class="banner-meta">
-        <div><strong>Marco Operativo:</strong> SOC Abuse Lite v2.0</div>
-        <div><strong>Plataforma:</strong> DFIR-IRIS</div>
-        <div><strong>Generado:</strong> Automatizado por SecOps</div>
+      <div class="kpi-card" style="padding:9px;">
+        <div class="kpi-label">IPs por Rol Semántico</div>
+        <div style="font-weight:700; margin-top:2px;">Hosting: ${esc(norm.hosting_ip)}</div>
+        <div class="kpi-sub">Reportada: ${esc(norm.reported_ip)} | SMTP: ${esc(norm.src_ip)}</div>
+      </div>
+      <div class="kpi-card" style="padding:9px;">
+        <div class="kpi-label">Cliente & Servidor</div>
+        <div style="font-weight:700; margin-top:2px;">Srv: ${esc(norm.server_name)}</div>
+        <div class="kpi-sub">Cliente #${esc(norm.client_id)} · Servicio #${esc(norm.service_id)}</div>
       </div>
     </div>
-    <div class="report-content">
-      ${renderedContent}
+    <div style="font-size:12px; margin-bottom:8px;">
+      <strong>4 Ejes de Clasificación:</strong>
+      <span class="badge badge-info">1. Reportado: ${esc(heur.reported_activity)}</span>
+      <span class="badge badge-purple">2. Confirmado: ${esc(heur.confirmed_incident_type)}</span>
+      <span class="badge badge-neutral">3. Vector: ${esc(heur.entry_vector)}</span>
+      <span class="badge badge-neutral">4. Causa: ${esc(heur.root_cause)}</span>
     </div>
-    <div class="report-footer">
-      <span>Documento Confidencial &bull; Uso Exclusivo del Centro de Operaciones de Seguridad (SOC)</span>
-      <span>SOC Neubox &bull; Hospedando</span>
+    <div style="font-size:11.5px; color:var(--text-secondary); margin-bottom:8px;">
+      <strong>Paquete Forense SHA-256:</strong> <code>${esc(pkg.primary_sha256)}</code><br/>
+      <strong>Casos Correlacionados en IRIS:</strong> ${(corr.correlated_case_ids || []).map((id) => "#" + id).join(", ") || "Ninguno"}
     </div>
+    <div class="code-box" style="max-height:210px;">${esc(JSON.stringify({ indicators_by_role: norm.indicators_by_role, signals: heur.signals, actions: heur.proposed_actions }, null, 2))}</div>
   `;
 }
 
-function copyReportMarkdown() {
-  const editor = document.getElementById("report-markdown-editor");
-  navigator.clipboard.writeText(editor.value).then(() => {
-    alert("✓ Markdown del informe copiado al portapapeles.");
-  }).catch(() => {
-    editor.select();
-    document.execCommand("copy");
-    alert("✓ Markdown copiado.");
-  });
-}
-
-function printReportDocument() {
-  window.print();
-}
-
-async function downloadReportPdf() {
-  if (!activeReportCaseId) return;
-
-  const btnDownload = document.getElementById("btn-download-pdf");
-  const statusHint = document.getElementById("report-modal-status");
-  btnDownload.disabled = true;
-  statusHint.textContent = "Compilando PDF con Google Chrome / motor de renderizado...";
-
-  const editor = document.getElementById("report-markdown-editor");
-  const editedMarkdown = editor.value;
-
-  const custName = activeReportCaseData ? activeReportCaseData.customer_name : "Neubox";
-  const custCode = activeReportCaseData ? activeReportCaseData.customer_code : "NBX";
+// =========================================================
+// 4. GESTIÓN ESTRUCTURADA DE CASOS DFIR-IRIS
+// =========================================================
+async function loadCases() {
+  const tbody = document.getElementById("casesTableBody");
+  if (!tbody) return;
+  const st = document.getElementById("casesStateFilter")?.value || "open";
+  const q = (document.getElementById("casesSearchInput")?.value || "").trim();
+  const params = new URLSearchParams({ state_filter: st });
+  if (SOC_STATE.globalOrg) params.set("organization", SOC_STATE.globalOrg);
+  if (q) params.set("search", q);
 
   try {
-    const res = await fetch("/api/report/export-pdf", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        markdown: editedMarkdown,
-        title: `Informe de Incidente — Caso #${activeReportCaseId}`,
-        customer_name: custName,
-        customer_code: custCode
-      })
-    });
-
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.detail || "Error al compilar PDF");
+    const data = await apiFetch(`/api/v1/cases?${params.toString()}`);
+    const list = data.cases || [];
+    if (!list.length) {
+      tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; padding:20px; color:var(--text-secondary);">No se encontraron casos con los filtros seleccionados.</td></tr>`;
+      return;
     }
-
-    const blob = await res.blob();
-    const url = window.URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `Reporte_Incidente_Caso_${activeReportCaseId}_${custCode}.pdf`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    window.URL.revokeObjectURL(url);
-
-    statusHint.textContent = "✓ PDF descargado exitosamente";
-  } catch (err) {
-    alert("Error al descargar PDF: " + err.message);
-    statusHint.textContent = "Error en la descarga";
-  } finally {
-    btnDownload.disabled = false;
-  }
-}
-
-// -------------------------------------------------------------
-// 18.1. Report Image Upload to IRIS Datastore & Paste Listener
-// -------------------------------------------------------------
-async function uploadReportImage(event) {
-  const files = event.target.files;
-  if (!files || !files.length) return;
-  if (!activeReportCaseId) {
-    alert("No hay un caso activo para adjuntar la evidencia.");
-    return;
-  }
-
-  const btn = document.getElementById("btn-attach-report-img");
-  const origText = btn ? btn.textContent : "🖼️ Adjuntar Imagen";
-  if (btn) {
-    btn.disabled = true;
-    btn.textContent = "⏳ Subiendo...";
-  }
-
-  const statusHint = document.getElementById("report-modal-status");
-
-  for (const file of Array.from(files)) {
-    if (statusHint) statusHint.textContent = `Subiendo ${file.name} al Datastore de IRIS...`;
-    const formData = new FormData();
-    formData.append("file", file);
-    formData.append("description", `Captura adjunta al reporte (${file.name})`);
-
-    try {
-      const res = await fetch(`/api/cases/${activeReportCaseId}/upload-evidence`, {
-        method: "POST",
-        body: formData
-      });
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.detail || "Error al subir evidencia a IRIS");
-      }
-
-      const data = await res.json();
-      const editor = document.getElementById("report-markdown-editor");
-      if (editor) {
-        const snippet = data.markdown_snippet;
-        const cursorPos = editor.selectionStart;
-        if (cursorPos != null && cursorPos >= 0) {
-          const before = editor.value.substring(0, cursorPos);
-          const after = editor.value.substring(editor.selectionEnd);
-          editor.value = before + snippet + after;
-        } else {
-          editor.value += snippet;
-        }
-        onReportMarkdownEdit();
-      }
-
-      if (statusHint) {
-        statusHint.textContent = `✓ ${data.filename} guardada en Datastore IRIS (SHA-256: ${data.sha256.substring(0, 10)}...)`;
-        statusHint.style.color = "#10b981";
-      }
-    } catch (err) {
-      alert(`Error al subir ${file.name}: ` + err.message);
-    }
-  }
-
-  if (btn) {
-    btn.disabled = false;
-    btn.textContent = origText;
-  }
-  event.target.value = "";
-  setTimeout(() => {
-    if (statusHint) {
-      statusHint.style.color = "";
-      statusHint.textContent = "Listo para exportar";
-    }
-  }, 4000);
-}
-
-function initReportEditorPasteListener() {
-  const reportEditor = document.getElementById("report-markdown-editor");
-  if (!reportEditor) return;
-
-  reportEditor.addEventListener("paste", async (e) => {
-    const items = (e.clipboardData || window.clipboardData).items;
-    for (const item of items) {
-      if (item.kind === "file" && item.type.startsWith("image/")) {
-        e.preventDefault();
-        const blob = item.getAsFile();
-        if (blob && activeReportCaseId) {
-          const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-          const ext = blob.type.split("/")[1] || "png";
-          const file = new File([blob], `captura_evidencia_${timestamp}.${ext}`, { type: blob.type });
-          const mockEvent = { target: { files: [file], value: "" } };
-          await uploadReportImage(mockEvent);
-        } else if (!activeReportCaseId) {
-          alert("Abre un caso en el reporte antes de pegar imágenes.");
-        }
-        break;
-      }
-    }
-  });
-}
-
-// -------------------------------------------------------------
-// 18.2. Ticket Creation Evidence Attachments (Datastore)
-// -------------------------------------------------------------
-function handleTicketEvidenceUpload(event) {
-  const files = event.target.files;
-  if (!files || !files.length) return;
-  uploadTicketEvidenceFiles(Array.from(files));
-  event.target.value = "";
-}
-
-async function uploadTicketEvidenceFiles(files) {
-  for (const file of files) {
-    const formData = new FormData();
-    formData.append("file", file);
-    try {
-      const res = await fetch("/api/upload-evidence-temp", {
-        method: "POST",
-        body: formData
-      });
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.detail || "Error subiendo evidencia temporal");
-      }
-      const data = await res.json();
-      attachedEvidences.push(data);
-      renderEvidencesList();
-    } catch (err) {
-      alert(`Error procesando ${file.name}: ` + err.message);
-    }
-  }
-}
-
-function removeEvidence(idx) {
-  attachedEvidences.splice(idx, 1);
-  renderEvidencesList();
-}
-
-function renderEvidencesList() {
-  const grid = document.getElementById("evidences-grid");
-  const countEl = document.getElementById("evidences-count");
-  if (countEl) countEl.textContent = attachedEvidences.length;
-  if (!grid) return;
-
-  if (attachedEvidences.length === 0) {
-    grid.innerHTML = "";
-    return;
-  }
-
-  grid.innerHTML = attachedEvidences.map((ev, idx) => `
-    <div class="evidence-card">
-      <button type="button" class="evidence-card-delete" onclick="removeEvidence(${idx})" title="Eliminar evidencia">&times;</button>
-      ${ev.is_image ? `<img src="${ev.data_uri}" class="evidence-card-thumb" alt="${ev.filename}">` : `<div class="evidence-card-placeholder">📄</div>`}
-      <div class="evidence-card-meta">
-        <div class="evidence-card-name" title="${ev.filename}">${ev.filename}</div>
-        <div class="evidence-card-hash" title="SHA-256: ${ev.sha256}">SHA: ${ev.sha256.substring(0, 16)}...</div>
-        <div style="font-size:0.7rem; color:#64748b; margin-top:3px;">${(ev.file_size / 1024).toFixed(1)} KB &bull; Datastore IRIS</div>
-      </div>
-    </div>
-  `).join("");
-}
-
-function initEvidenceDropzone() {
-  const dropzone = document.getElementById("evidences-dropzone");
-  if (!dropzone) return;
-
-  ["dragenter", "dragover"].forEach(eventName => {
-    dropzone.addEventListener(eventName, (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      dropzone.classList.add("drag-over");
-    });
-  });
-
-  ["dragleave", "drop"].forEach(eventName => {
-    dropzone.addEventListener(eventName, (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      dropzone.classList.remove("drag-over");
-    });
-  });
-
-  dropzone.addEventListener("drop", (e) => {
-    const dt = e.dataTransfer;
-    const files = dt.files;
-    if (files && files.length) {
-      uploadTicketEvidenceFiles(Array.from(files));
-    }
-  });
-}
-
-// -------------------------------------------------------------
-// 19. Edit Case Modal
-// -------------------------------------------------------------
-async function openEditModal(caseId) {
-  const modal = document.getElementById("modal-edit-case");
-  const title = document.getElementById("modal-edit-title");
-  const caseIdInput = document.getElementById("edit-case-id");
-  const nameInput = document.getElementById("edit-case-name");
-  const stateSelect = document.getElementById("edit-case-state");
-  const descInput = document.getElementById("edit-case-desc");
-  const descPreview = document.getElementById("edit-case-desc-preview");
-  const toggleBtn = document.getElementById("btn-toggle-edit-desc");
-  const notesContainer = document.getElementById("edit-case-notes-container");
-  const iocsContainer = document.getElementById("edit-case-iocs-container");
-
-  title.textContent = `Editar Caso #${caseId}`;
-  caseIdInput.value = caseId;
-  nameInput.value = "Cargando...";
-  descInput.value = "Cargando...";
-  descPreview.classList.add("hidden");
-  descInput.classList.remove("hidden");
-  toggleBtn.textContent = "👁️ Previsualizar";
-  if (notesContainer) notesContainer.innerHTML = "<p style='color:var(--text-muted);font-size:0.84rem'>Cargando notas de DFIR-IRIS...</p>";
-  if (iocsContainer) iocsContainer.innerHTML = "<p style='color:var(--text-muted);font-size:0.84rem'>Cargando IOCs...</p>";
-  modal.classList.remove("hidden");
-
-  try {
-    const res = await fetch(`/api/cases/${caseId}`);
-    if (!res.ok) throw new Error("No se pudo obtener información del caso");
-    const data = await res.json();
-    const c = data.case || {};
-
-    nameInput.value = c.name || "";
-    stateSelect.value = String(c.state_id || 2);
-    descInput.value = c.description || "";
-
-    // Render case notes
-    if (notesContainer) {
-      const notes = data.notes || [];
-      if (notes.length === 0) {
-        notesContainer.innerHTML = "<p style='color:var(--text-dim);font-size:0.82rem;font-style:italic'>No se encontraron notas en IRIS para este caso.</p>";
-      } else {
-        notesContainer.innerHTML = "";
-        notes.forEach((n, idx) => {
-          const card = document.createElement("div");
-          card.className = "note-item";
-          card.style.marginBottom = "8px";
-          card.innerHTML = `
-            <div class="note-header">
-              <span style="font-weight:600">${escapeHtml(n.note_title)}</span>
-              <div class="note-header-actions">
-                <button type="button" class="btn-note-toggle" id="btn-edit-note-toggle-${idx}" onclick="toggleEditModalNote(${idx})">
-                  👁️ Previsualizar
-                </button>
-              </div>
+    tbody.innerHTML = list
+      .map(
+        (c) => `
+        <tr>
+          <td><strong>#${c.case_id}</strong></td>
+          <td>${orgBadge(c.organization)}</td>
+          <td><strong>${esc(c.case_name)}</strong></td>
+          <td>
+            <div>${esc(c.primary_domain)}</div>
+            <div style="font-size:11px; color:var(--text-muted);">Srv: ${esc(c.server_name)}</div>
+          </td>
+          <td>
+            <div>Abuso: #${esc(c.abuse_ticket_id)}</div>
+            <div style="font-size:11px; color:var(--text-muted);">Titular: #${esc(c.holder_ticket_id)} | Cte: #${esc(c.client_id)}</div>
+          </td>
+          <td>
+            <span class="badge ${c.schema_version === "3.0" ? "badge-purple" : "badge-warn"}">
+              ${c.schema_version === "3.0" ? "v3.0 Normalizado" : "Histórico v2"}
+            </span>
+          </td>
+          <td><span class="badge ${c.is_closed ? "badge-neutral" : "badge-ok"}">${esc(c.state_name)}</span></td>
+          <td>
+            <div style="display:flex; gap:6px;">
+              <button class="btn btn-primary btn-sm" onclick="openCaseWorkspace(${c.case_id})">✏️ Estación Caso</button>
+              <a href="/api/v1/cases/${c.case_id}/report.pdf" target="_blank" class="btn btn-sm" title="Informe PDF 15 Secciones">📄 PDF</a>
             </div>
-            <textarea
-              class="editable-note-textarea edit-modal-note-textarea"
-              id="edit-modal-note-text-${idx}"
-              data-note-id="${n.note_id || ''}"
-              data-title="${escapeHtml(n.note_title)}"
-              rows="6"
-            ></textarea>
-            <div class="rendered-note-view hidden" id="edit-modal-note-preview-${idx}"></div>
-          `;
-          const ta = card.querySelector("textarea");
-          if (ta) ta.value = n.note_content || "";
-          notesContainer.appendChild(card);
-        });
-      }
-    }
-
-    // Render case IOCs
-    if (iocsContainer) {
-      const iocs = data.iocs || [];
-      if (iocs.length === 0) {
-        iocsContainer.innerHTML = "<p style='color:var(--text-dim);font-size:0.82rem;font-style:italic'>No hay indicadores IOCs registrados para este caso.</p>";
-      } else {
-        iocsContainer.innerHTML = "";
-        iocs.forEach(ioc => {
-          const row = document.createElement("div");
-          row.className = "ioc-row";
-          const t = (ioc.ioc_type || "other").toLowerCase();
-          const badgeClass = t.includes("domain") ? "domain" : (t.includes("ip") ? "ip" : (t.includes("url") ? "url" : (t.includes("mail") ? "email" : "other")));
-          row.innerHTML = `
-            <span class="ioc-badge ${badgeClass}">${escapeHtml((ioc.ioc_type || "IOC").toUpperCase())}</span>
-            <span class="ioc-val">${escapeHtml(ioc.ioc_value)}</span>
-            <span style="font-size:0.75rem;color:var(--text-dim)">${escapeHtml(ioc.tlp_name || 'TLP:AMBER')}</span>
-          `;
-          iocsContainer.appendChild(row);
-        });
-      }
-    }
-  } catch (err) {
-    alert("Error cargando caso: " + err.message);
-    closeEditModal();
+          </td>
+        </tr>`
+      )
+      .join("");
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="8" style="color:var(--status-danger);">Error cargando casos: ${esc(e.message)}</td></tr>`;
   }
 }
 
-function closeEditModal() {
-  document.getElementById("modal-edit-case").classList.add("hidden");
-  document.getElementById("edit-modal-status").textContent = "";
-}
-
-function toggleEditModalDesc() {
-  const descInput = document.getElementById("edit-case-desc");
-  const descPreview = document.getElementById("edit-case-desc-preview");
-  const toggleBtn = document.getElementById("btn-toggle-edit-desc");
-
-  const isPreview = !descPreview.classList.contains("hidden");
-  if (isPreview) {
-    descPreview.classList.add("hidden");
-    descInput.classList.remove("hidden");
-    toggleBtn.textContent = "👁️ Previsualizar";
-    descInput.focus();
-  } else {
-    descPreview.innerHTML = parseMarkdownSafe(descInput.value);
-    descInput.classList.add("hidden");
-    descPreview.classList.remove("hidden");
-    toggleBtn.textContent = "✏️ Editar";
+async function openCaseWorkspace(caseId) {
+  SOC_STATE.activeCaseId = caseId;
+  const navBtn = document.getElementById("navActiveCaseBtn");
+  const navLbl = document.getElementById("navActiveCaseLabel");
+  if (navBtn && navLbl) {
+    navBtn.style.display = "flex";
+    navLbl.textContent = `✏️ Caso #${caseId}`;
   }
-}
-
-function toggleEditModalNote(idx) {
-  const textarea = document.getElementById(`edit-modal-note-text-${idx}`);
-  const previewDiv = document.getElementById(`edit-modal-note-preview-${idx}`);
-  const toggleBtn = document.getElementById(`btn-edit-note-toggle-${idx}`);
-
-  if (!textarea || !previewDiv) return;
-  const isPreview = !previewDiv.classList.contains("hidden");
-
-  if (isPreview) {
-    previewDiv.classList.add("hidden");
-    textarea.classList.remove("hidden");
-    toggleBtn.textContent = "👁️ Previsualizar";
-    textarea.focus();
-  } else {
-    previewDiv.innerHTML = parseMarkdownSafe(textarea.value);
-    textarea.classList.add("hidden");
-    previewDiv.classList.remove("hidden");
-    toggleBtn.textContent = "✏️ Editar";
-  }
-}
-
-async function saveCaseEdits() {
-  const caseId = document.getElementById("edit-case-id").value;
-  const name = document.getElementById("edit-case-name").value.trim();
-  const stateId = parseInt(document.getElementById("edit-case-state").value, 10);
-  const desc = document.getElementById("edit-case-desc").value.trim();
-  const statusElem = document.getElementById("edit-modal-status");
-  const btnSave = document.getElementById("btn-save-case");
-
-  // Gather edited notes
-  const editedNotes = [];
-  document.querySelectorAll(".edit-modal-note-textarea").forEach(ta => {
-    editedNotes.push({
-      note_id: ta.dataset.noteId ? parseInt(ta.dataset.noteId, 10) : null,
-      title: ta.dataset.title,
-      content: ta.value
-    });
-  });
-
-  btnSave.disabled = true;
-  statusElem.textContent = "Guardando en DFIR-IRIS...";
+  switchView("case-workspace");
 
   try {
-    const res = await fetch(`/api/cases/${caseId}/update`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        case_name: name,
-        case_description: desc,
-        state_id: stateId,
-        notes: editedNotes
-      })
-    });
-
-    const data = await res.json();
-    if (res.ok && data.success) {
-      statusElem.textContent = "✓ Guardado exitosamente";
-      setTimeout(() => {
-        closeEditModal();
-        loadIrisCases(true);
-      }, 700);
-    } else {
-      statusElem.textContent = `Error: ${data.detail || data.error}`;
-    }
-  } catch (err) {
-    statusElem.textContent = `Error de red: ${err.message}`;
-  } finally {
-    btnSave.disabled = false;
+    const bundle = await apiFetch(`/api/v1/cases/${caseId}`);
+    SOC_STATE.activeCaseBundle = bundle;
+    renderCaseWorkspace(bundle);
+  } catch (e) {
+    showToast("Error cargando estación del caso #" + caseId + ": " + e.message);
   }
 }
+
+function closeCaseWorkspace(ev) {
+  if (ev) ev.stopPropagation();
+  SOC_STATE.activeCaseId = null;
+  SOC_STATE.activeCaseBundle = null;
+  const navBtn = document.getElementById("navActiveCaseBtn");
+  if (navBtn) navBtn.style.display = "none";
+  switchView("cases");
+}
+
+function switchCaseSubtab(tabKey) {
+  document.querySelectorAll(".case-subtab-pane").forEach((p) => (p.style.display = "none"));
+  const pane = document.getElementById(`case-subtab-${tabKey}`);
+  if (pane) pane.style.display = "block";
+
+  const buttons = document.querySelectorAll("#view-case-workspace .subtab-btn");
+  const idxMap = { ident: 0, inv: 1, actions: 2, comms: 3, notes: 4 };
+  buttons.forEach((b, i) => b.classList.toggle("active", i === idxMap[tabKey]));
+}
+
+function renderCaseWorkspace(bundle) {
+  const iris = bundle.iris_case || {};
+  const ext = bundle.extension || {};
+  const prov = ext.field_provenance_json || {};
+  const cid = iris.case_id || ext.iris_case_id;
+
+  const cleanTitle = (iris.case_name || "").replace(/^#\d+\s*-\s*/, "");
+  document.getElementById("wsCaseHeaderTitle").textContent = `Caso #${cid} — ${cleanTitle}`;
+  document.getElementById("wsCaseOrgBadge").textContent = ext.organization || "NBX";
+  document.getElementById("wsCaseSchemaBadge").textContent = `Esquema ${ext.schema_version || "3.0"}`;
+  document.getElementById("wsDownloadPdfBtn").href = `/api/v1/cases/${cid}/report.pdf`;
+
+  document.getElementById("wsQuickSummaryBox").innerHTML = `
+    <div><strong>Dominio:</strong> <code>${esc(ext.primary_domain)}</code></div>
+    <div><strong>Ticket Abuso:</strong> #${esc(ext.abuse_ticket_id)} | <strong>Titular:</strong> #${esc(ext.holder_ticket_id)}</div>
+    <div><strong>ID Cliente:</strong> #${esc(ext.client_id)} | <strong>ID Servicio:</strong> #${esc(ext.service_id)}</div>
+    <div><strong>Servidor:</strong> <code>${esc(ext.server_name)}</code></div>
+    <div><strong>IP Hosting:</strong> ${esc(ext.hosting_ip)} | <strong>IP Reportada:</strong> ${esc(ext.reported_ip)}</div>
+    <div><strong>IOCs en IRIS:</strong> ${(iris.iocs || []).length} | <strong>Evidencias:</strong> ${(iris.evidences || []).length}</div>
+  `;
+
+  document.getElementById("wsCaseName").value = cleanTitle;
+  document.getElementById("wsOrganization").value = ext.organization || "NBX";
+  document.getElementById("wsStateId").value = String(iris.state_id || 3);
+  document.getElementById("wsAbuseTicket").value = ext.abuse_ticket_id || "";
+  document.getElementById("wsHolderTicket").value = ext.holder_ticket_id || "";
+  document.getElementById("wsClientId").value = ext.client_id || "";
+  document.getElementById("wsServiceId").value = ext.service_id || "";
+  document.getElementById("wsPrimaryDomain").value = ext.primary_domain || "";
+  document.getElementById("wsServerName").value = ext.server_name || "";
+  document.getElementById("wsHostingIp").value = ext.hosting_ip || "";
+  document.getElementById("wsReportedIp").value = ext.reported_ip || "";
+  document.getElementById("wsCategoryCode").value = ext.category_code || "abuse_phishing";
+  document.getElementById("wsReportedActivity").value = ext.reported_activity || "unknown";
+  document.getElementById("wsConfirmedIncident").value = ext.confirmed_incident_type || "pending_investigation";
+  document.getElementById("wsEntryVector").value = ext.entry_vector || "unknown";
+  document.getElementById("wsRootCause").value = ext.root_cause || "unknown";
+  document.getElementById("wsIsCompromise").value = String(Boolean(ext.is_technical_compromise));
+  document.getElementById("wsCaseDescription").value = iris.case_description || "";
+
+  for (const k of [
+    "abuse_ticket_id",
+    "holder_ticket_id",
+    "client_id",
+    "service_id",
+    "primary_domain",
+    "server_name",
+    "hosting_ip",
+    "reported_ip",
+  ]) {
+    const el = document.getElementById(`ws_prov_${k}`);
+    if (el) {
+      const pv = (prov[k] || "rule").toLowerCase();
+      el.className = `prov-tag prov-${pv === "manual" ? "manual" : pv === "ai" ? "ai" : "rule"}`;
+      el.textContent = pv.toUpperCase();
+    }
+  }
+
+  // Renderizar Investigaciones
+  const invList = bundle.investigations || [];
+  document.getElementById("wsInvestigationsList").innerHTML = invList.length
+    ? `<table class="soc-table"><thead><tr><th>Fuente</th><th>Consulta</th><th>Naturaleza</th><th>Resultado</th></tr></thead><tbody>` +
+      invList
+        .map(
+          (i) =>
+            `<tr><td><strong>${esc(i.source_consulted)}</strong></td><td><code>${esc(i.commands_or_queries)}</code></td><td><span class="badge badge-info">${esc(i.fact_type)}</span></td><td>${esc(i.results_observed)}</td></tr>`
+        )
+        .join("") +
+      `</tbody></table>`
+    : `<p style="color:var(--text-muted); font-size:12px;">Sin actividades de investigación registradas aún.</p>`;
+
+  // Renderizar Hallazgos
+  const findList = bundle.findings || [];
+  document.getElementById("wsFindingsList").innerHTML = findList.length
+    ? `<table class="soc-table"><thead><tr><th>Hallazgo</th><th>Naturaleza</th><th>Estado Verificación</th><th>Descripción</th></tr></thead><tbody>` +
+      findList
+        .map(
+          (f) =>
+            `<tr><td><strong>${esc(f.title)}</strong></td><td><code>${esc(f.finding_nature)}</code></td><td><span class="badge badge-purple">${esc(f.verification_state)}</span></td><td>${esc(f.description)}</td></tr>`
+        )
+        .join("") +
+      `</tbody></table>`
+    : `<p style="color:var(--text-muted); font-size:12px;">Sin hallazgos estructurados registrados aún.</p>`;
+
+  // Renderizar Acciones con selector en vivo de los 8 estados oficiales
+  const actList = bundle.actions || [];
+  const allStatuses = ["propuesta", "autorizada", "pendiente", "en_ejecucion", "ejecutada", "verificada", "cancelada", "no_aplicable"];
+  document.getElementById("wsActionsList").innerHTML = actList.length
+    ? `<table class="soc-table"><thead><tr><th>Acción</th><th>Tipo</th><th>Estado (8 Estados)</th><th>Evidencia / Notas</th></tr></thead><tbody>` +
+      actList
+        .map(
+          (a) => `
+          <tr>
+            <td><strong>${esc(a.title)}</strong> ${provBadge(a.provenance)}</td>
+            <td><code>${esc(a.action_type)}</code></td>
+            <td>
+              <select onchange="changeCaseActionStatus(${a.id}, this.value)" style="width:145px;">
+                ${allStatuses.map((st) => `<option value="${st}" ${a.status === st ? "selected" : ""}>${st.toUpperCase()}</option>`).join("")}
+              </select>
+            </td>
+            <td>${esc(a.result_notes)}</td>
+          </tr>`
+        )
+        .join("") +
+      `</tbody></table>`
+    : `<p style="color:var(--text-muted); font-size:12px;">Sin acciones registradas. Puedes aplicar un Playbook arriba o agregar una acción abajo.</p>`;
+
+  // Renderizar Comunicaciones
+  const commsList = bundle.communications || [];
+  document.getElementById("wsCommsList").innerHTML = commsList.length
+    ? `<table class="soc-table"><thead><tr><th>Canal</th><th>Destinatario</th><th>Ref / Ticket</th><th>Resumen</th></tr></thead><tbody>` +
+      commsList
+        .map(
+          (cm) =>
+            `<tr><td>${esc(cm.channel)}</td><td><strong>${esc(cm.recipient)}</strong></td><td>${esc(cm.ticket_reference)}</td><td>${esc(cm.summary)}</td></tr>`
+        )
+        .join("") +
+      `</tbody></table>`
+    : `<p style="color:var(--text-muted); font-size:12px;">Sin comunicaciones registradas aún.</p>`;
+
+  // Evidencias e IOCs
+  const iocs = iris.iocs || [];
+  const evs = iris.evidences || [];
+  document.getElementById("wsEvidencesAndIocsBox").innerHTML = `
+    <div style="margin-bottom:10px;">
+      <strong>Evidencias en Datastore IRIS (${evs.length}):</strong>
+      ${evs.map((e) => `<span class="badge badge-ok" style="margin-left:6px;">📎 ${esc(e.filename)} (${esc(e.file_size, 0)} B)</span>`).join("") || "Ninguna"}
+    </div>
+    <div>
+      <strong>Indicadores IOCs en IRIS (${iocs.length}):</strong>
+      ${iocs.map((i) => `<span class="badge badge-info" style="margin:3px;">${esc(i.ioc_type)}: ${esc(i.ioc_value)}</span>`).join("") || "Ninguno"}
+    </div>
+  `;
+
+  // Notas originales de IRIS
+  const notes = iris.notes || [];
+  document.getElementById("wsIrisNotesList").innerHTML = notes
+    .map(
+      (n) => `
+      <div class="card" style="background:var(--bg-card); margin-bottom:10px;">
+        <div style="font-weight:700; margin-bottom:6px; color:var(--accent-cyan);">
+          📝 ${esc(n.note_title)} <span style="font-size:11px; color:var(--text-muted);">(${esc(n.directory_name)} · Nota #${n.note_id})</span>
+        </div>
+        <div class="code-box" style="max-height:220px;">${esc(n.note_content)}</div>
+      </div>`
+    )
+    .join("");
+}
+
+async function saveStructuredCaseWorkspace() {
+  if (!SOC_STATE.activeCaseId) return;
+  try {
+    const body = {
+      case_name: document.getElementById("wsCaseName").value,
+      organization: document.getElementById("wsOrganization").value,
+      state_id: parseInt(document.getElementById("wsStateId").value, 10),
+      case_description: document.getElementById("wsCaseDescription").value,
+      abuse_ticket_id: document.getElementById("wsAbuseTicket").value,
+      holder_ticket_id: document.getElementById("wsHolderTicket").value,
+      client_id: document.getElementById("wsClientId").value,
+      service_id: document.getElementById("wsServiceId").value,
+      primary_domain: document.getElementById("wsPrimaryDomain").value,
+      server_name: document.getElementById("wsServerName").value,
+      hosting_ip: document.getElementById("wsHostingIp").value,
+      reported_ip: document.getElementById("wsReportedIp").value,
+      category_code: document.getElementById("wsCategoryCode").value,
+      reported_activity: document.getElementById("wsReportedActivity").value,
+      confirmed_incident_type: document.getElementById("wsConfirmedIncident").value,
+      entry_vector: document.getElementById("wsEntryVector").value,
+      root_cause: document.getElementById("wsRootCause").value,
+      is_technical_compromise: document.getElementById("wsIsCompromise").value === "true",
+      sync_structured_note_to_iris: true,
+    };
+    await apiFetch(`/api/v1/cases/${SOC_STATE.activeCaseId}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+    showToast(`Caso #${SOC_STATE.activeCaseId} guardado en PostgreSQL y sincronizado con DFIR-IRIS.`);
+    await openCaseWorkspace(SOC_STATE.activeCaseId);
+  } catch (e) {
+    showToast("Error guardando caso: " + e.message);
+  }
+}
+
+async function addWorkspaceInvestigation() {
+  if (!SOC_STATE.activeCaseId) return;
+  const resObs = document.getElementById("newInvResult").value.trim();
+  if (!resObs) return showToast("Describe el resultado observado.");
+  await apiFetch(`/api/v1/cases/${SOC_STATE.activeCaseId}/investigations`, {
+    method: "POST",
+    body: JSON.stringify({
+      source_consulted: document.getElementById("newInvSource").value,
+      commands_or_queries: document.getElementById("newInvQuery").value,
+      fact_type: document.getElementById("newInvFactType").value,
+      results_observed: resObs,
+    }),
+  });
+  document.getElementById("newInvResult").value = "";
+  showToast("Actividad de investigación registrada.");
+  await openCaseWorkspace(SOC_STATE.activeCaseId);
+}
+
+async function addWorkspaceFinding() {
+  if (!SOC_STATE.activeCaseId) return;
+  const title = document.getElementById("newFindingTitle").value.trim();
+  const desc = document.getElementById("newFindingDesc").value.trim();
+  if (!title || !desc) return showToast("Completa título y descripción del hallazgo.");
+  await apiFetch(`/api/v1/cases/${SOC_STATE.activeCaseId}/findings`, {
+    method: "POST",
+    body: JSON.stringify({
+      title,
+      description: desc,
+      finding_nature: document.getElementById("newFindingNature").value,
+      verification_state: document.getElementById("newFindingState").value,
+    }),
+  });
+  document.getElementById("newFindingTitle").value = "";
+  document.getElementById("newFindingDesc").value = "";
+  showToast("Hallazgo registrado.");
+  await openCaseWorkspace(SOC_STATE.activeCaseId);
+}
+
+async function addWorkspaceAction() {
+  if (!SOC_STATE.activeCaseId) return;
+  const title = document.getElementById("newActionTitle").value.trim();
+  if (!title) return showToast("Escribe el título de la acción.");
+  await apiFetch(`/api/v1/cases/${SOC_STATE.activeCaseId}/actions`, {
+    method: "POST",
+    body: JSON.stringify({
+      action_type: document.getElementById("newActionType").value,
+      title,
+      status: document.getElementById("newActionStatus").value,
+      result_notes: document.getElementById("newActionNotes").value,
+      sync_task_to_iris: true,
+    }),
+  });
+  document.getElementById("newActionTitle").value = "";
+  document.getElementById("newActionNotes").value = "";
+  showToast("Acción registrada y sincronizada con Tareas de DFIR-IRIS.");
+  await openCaseWorkspace(SOC_STATE.activeCaseId);
+}
+
+async function changeCaseActionStatus(actionId, newStatus) {
+  if (!SOC_STATE.activeCaseId) return;
+  await apiFetch(`/api/v1/cases/${SOC_STATE.activeCaseId}/actions/${actionId}`, {
+    method: "PUT",
+    body: JSON.stringify({ status: newStatus }),
+  });
+  showToast(`Estado de acción actualizado a '${newStatus.toUpperCase()}' y sincronizado con IRIS.`);
+}
+
+async function applySelectedPlaybookToCase() {
+  if (!SOC_STATE.activeCaseId) return;
+  const pbCode = document.getElementById("wsPlaybookSelect").value;
+  if (!pbCode) return;
+  const res = await apiFetch(`/api/v1/cases/${SOC_STATE.activeCaseId}/apply-playbook/${pbCode}`, {
+    method: "POST",
+  });
+  showToast(`Playbook aplicado (${res.steps_added} pasos nuevos sincronizados en IRIS).`);
+  await openCaseWorkspace(SOC_STATE.activeCaseId);
+}
+
+async function addWorkspaceCommunication() {
+  if (!SOC_STATE.activeCaseId) return;
+  const rec = document.getElementById("newCommRecipient").value.trim();
+  const sum = document.getElementById("newCommSummary").value.trim();
+  if (!rec || !sum) return showToast("Completa destinatario y resumen.");
+  await apiFetch(`/api/v1/cases/${SOC_STATE.activeCaseId}/communications`, {
+    method: "POST",
+    body: JSON.stringify({
+      channel: document.getElementById("newCommChannel").value,
+      recipient: rec,
+      ticket_reference: document.getElementById("newCommRef").value,
+      summary: sum,
+    }),
+  });
+  document.getElementById("newCommRecipient").value = "";
+  document.getElementById("newCommSummary").value = "";
+  showToast("Comunicación registrada.");
+  await openCaseWorkspace(SOC_STATE.activeCaseId);
+}
+
+async function closeCurrentCaseInIris() {
+  if (!SOC_STATE.activeCaseId) return;
+  if (!confirm(`¿Confirmas cerrar el Caso #${SOC_STATE.activeCaseId} en DFIR-IRIS?`)) return;
+  await apiFetch(`/api/v1/cases/${SOC_STATE.activeCaseId}/close`, { method: "POST" });
+  showToast(`Caso #${SOC_STATE.activeCaseId} cerrado en DFIR-IRIS.`);
+  await openCaseWorkspace(SOC_STATE.activeCaseId);
+}
+
+async function askGeminiCaseAssistant(presetPrompt) {
+  const inputEl = document.getElementById("wsGeminiInput");
+  const instruction = presetPrompt || (inputEl ? inputEl.value.trim() : "");
+  if (!instruction) return;
+  if (!presetPrompt && inputEl) inputEl.value = "";
+
+  const outBox = document.getElementById("wsGeminiChatOutput");
+  outBox.textContent = "Consultando a Google Gemini SOC Assistant...";
+
+  const ctx = (SOC_STATE.activeCaseBundle && SOC_STATE.activeCaseBundle.extension) || {};
+  try {
+    const res = await apiFetch("/api/v1/admin/gemini/assist", {
+      method: "POST",
+      body: JSON.stringify({ instruction, context: ctx }),
+    });
+    outBox.textContent = `[Motor: ${res.engine}]\n\n${res.reply}`;
+  } catch (e) {
+    outBox.textContent = "Error en asistente: " + e.message;
+  }
+}
+
+async function openManualCaseModal() {
+  const domain = prompt("Dominio o activo primario para el nuevo caso manual:");
+  if (!domain) return;
+  const ticket = prompt("Número de ticket de referencia (opcional):", "MANUAL") || "MANUAL";
+  const org = prompt("Organización (NBX o HP):", SOC_STATE.globalOrg || "NBX") || "NBX";
+  try {
+    const res = await apiFetch("/api/v1/cases", {
+      method: "POST",
+      body: JSON.stringify({
+        organization: org.toUpperCase(),
+        primary_domain: domain.trim(),
+        abuse_ticket_id: ticket.trim(),
+      }),
+    });
+    showToast(`Caso manual #${res.case_id} creado en DFIR-IRIS.`);
+    await openCaseWorkspace(res.case_id);
+  } catch (e) {
+    showToast("Error creando caso manual: " + e.message);
+  }
+}
+
+// =========================================================
+// 5. MIGRACIÓN HISTÓRICA CONTROLADA (DRY-RUN Y LADO A LADO)
+// =========================================================
+async function loadMigrationCases() {
+  const tbody = document.getElementById("migrationTableBody");
+  if (!tbody) return;
+  try {
+    const data = await apiFetch("/api/v1/migration/cases");
+    const list = data.cases || [];
+    tbody.innerHTML = list
+      .map(
+        (c) => `
+        <tr>
+          <td><strong>#${c.case_id}</strong></td>
+          <td>${orgBadge(c.organization)}</td>
+          <td><strong>${esc(c.case_name)}</strong></td>
+          <td><span class="badge badge-info">${esc(c.state_name)}</span></td>
+          <td><span class="badge ${c.schema_version === "3.0" ? "badge-purple" : "badge-warn"}">${esc(c.schema_version)}</span></td>
+          <td>
+            <span class="badge ${
+              c.migration_status === "migrated"
+                ? "badge-ok"
+                : c.migration_status === "preview_ready"
+                ? "badge-info"
+                : "badge-warn"
+            }">
+              ${esc(c.migration_status.toUpperCase())}
+            </span>
+          </td>
+          <td><code>${c.snapshot_sha256 ? c.snapshot_sha256.slice(0, 14) + "..." : "Sin snapshot aún"}</code></td>
+          <td>
+            <div style="display:flex; gap:6px;">
+              <button class="btn btn-primary btn-sm" onclick="runCaseMigrationPreview(${c.case_id})">
+                🔍 Previsualizar (Dry-Run)
+              </button>
+              <button class="btn btn-sm" onclick="openCaseWorkspace(${c.case_id})">
+                📂 Ver Caso
+              </button>
+            </div>
+          </td>
+        </tr>`
+      )
+      .join("");
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="8" style="color:var(--status-danger);">Error escaneando casos históricos: ${esc(e.message)}</td></tr>`;
+  }
+}
+
+async function runCaseMigrationPreview(caseId) {
+  SOC_STATE.activeMigrationCaseId = caseId;
+  showToast(`Tomando snapshot SHA-256 y ejecutando Dry-Run para el Caso #${caseId}...`);
+  try {
+    const res = await apiFetch(`/api/v1/migration/cases/${caseId}/preview`, {
+      method: "POST",
+      body: JSON.stringify({ use_gemini: true }),
+    });
+    const orig = res.original || {};
+    const prop = res.proposed || {};
+    const dry = res.dry_run || {};
+
+    document.getElementById("migrationPreviewCard").style.display = "block";
+    document.getElementById("migPreviewTitle").textContent = `Previsualización Comparativa (Dry-Run) — Caso #${caseId}: ${orig.case_name || ""}`;
+    document.getElementById("migSnapshotBadge").textContent = `Snapshot SHA-256: ${(res.snapshot_sha256 || "").slice(0, 16)}...`;
+
+    const origNotesText = (orig.notes || [])
+      .map((n) => `--- [${n.note_title}] ---\n${n.note_content}`)
+      .join("\n\n");
+    document.getElementById("migOriginalBox").textContent =
+      `TÍTULO ORIGINAL: ${orig.case_name}\n\n` +
+      `RESUMEN ORIGINAL:\n${orig.case_description || ""}\n\n` +
+      `ATRIBUTOS PERSONALIZADOS:\n${JSON.stringify(orig.custom_attributes || {}, null, 2)}\n\n` +
+      `NOTAS HISTÓRICAS CONSERVADAS (${(orig.notes || []).length}):\n${origNotesText}`;
+
+    document.getElementById("migOrg").value = prop.organization || "NBX";
+    document.getElementById("migAbuseTicket").value = prop.abuse_ticket_id || "";
+    document.getElementById("migHolderTicket").value = prop.holder_ticket_id || "";
+    document.getElementById("migClientId").value = prop.client_id || "";
+    document.getElementById("migServiceId").value = prop.service_id || "";
+    document.getElementById("migDomain").value = prop.primary_domain || "";
+    document.getElementById("migServer").value = prop.server_name || "";
+    document.getElementById("migHostingIp").value = prop.hosting_ip || "";
+    document.getElementById("migReportedIp").value = prop.reported_ip || "";
+    document.getElementById("migCategory").value = prop.category_code || "abuse_phishing";
+    document.getElementById("migRepAct").value = prop.reported_activity || "unknown";
+    document.getElementById("migConfInc").value = prop.confirmed_incident_type || "pending_investigation";
+    document.getElementById("migVector").value = prop.entry_vector || "unknown";
+    document.getElementById("migRootCause").value = prop.root_cause || "unknown";
+    document.getElementById("migVerifState").value = prop.verification_state || "pendiente";
+
+    document.getElementById("migProposedBreakdownBox").textContent = JSON.stringify(
+      {
+        epistemological_breakdown: prop.epistemological_breakdown,
+        dry_run_operations: {
+          original_notes_preserved: dry.original_notes_preserved_count,
+          original_evidences_preserved: dry.original_evidences_preserved_count,
+          new_iocs_to_add: (dry.new_iocs_to_sync || []).length,
+          new_tasks_to_add: (dry.new_tasks_to_sync || []).length,
+          destructive_operations: 0,
+        },
+      },
+      null,
+      2
+    );
+    await loadMigrationCases();
+  } catch (e) {
+    showToast("Error en previsualización de migración: " + e.message);
+  }
+}
+
+async function approveAndExecuteSingleMigration() {
+  const caseId = SOC_STATE.activeMigrationCaseId;
+  if (!caseId) return;
+  if (
+    !confirm(
+      `¿Autorizas ejecutar la migración estructurada v3.0 para el Caso #${caseId}?\n\n` +
+        `• Se conservarán intactas las notas y evidencias originales.\n` +
+        `• Se guardarán los 4 ejes y entidades estructuradas en PostgreSQL.\n` +
+        `• Se sincronizarán IOCs, tareas y la nota técnica 04 en DFIR-IRIS sin duplicar.`
+    )
+  ) {
+    return;
+  }
+
+  const reviewedData = {
+    organization: document.getElementById("migOrg").value,
+    abuse_ticket_id: document.getElementById("migAbuseTicket").value,
+    holder_ticket_id: document.getElementById("migHolderTicket").value,
+    client_id: document.getElementById("migClientId").value,
+    service_id: document.getElementById("migServiceId").value,
+    primary_domain: document.getElementById("migDomain").value,
+    server_name: document.getElementById("migServer").value,
+    hosting_ip: document.getElementById("migHostingIp").value,
+    reported_ip: document.getElementById("migReportedIp").value,
+    category_code: document.getElementById("migCategory").value,
+    reported_activity: document.getElementById("migRepAct").value,
+    confirmed_incident_type: document.getElementById("migConfInc").value,
+    entry_vector: document.getElementById("migVector").value,
+    root_cause: document.getElementById("migRootCause").value,
+    verification_state: document.getElementById("migVerifState").value,
+  };
+
+  try {
+    await apiFetch(`/api/v1/migration/cases/${caseId}/execute`, {
+      method: "POST",
+      body: JSON.stringify({
+        reviewed_data: reviewedData,
+        sync_to_iris: true,
+        explicit_approval: true,
+      }),
+    });
+    showToast(`Caso #${caseId} migrado exitosamente al esquema v3.0.`);
+    document.getElementById("migrationPreviewCard").style.display = "none";
+    await loadMigrationCases();
+  } catch (e) {
+    showToast("Error ejecutando migración: " + e.message);
+  }
+}
+
+// =========================================================
+// 6. CONECTORES & BLACKLIST MASTER RBL
+// =========================================================
+async function loadConnectorsView() {
+  try {
+    const data = await apiFetch("/api/v1/admin/connectors");
+    const container = document.getElementById("connectorsCardsContainer");
+    container.innerHTML = (data.connectors || [])
+      .map(
+        (c) => `
+        <div class="card" style="background:var(--bg-card); margin-bottom:0;">
+          <div class="card-header">
+            <div>
+              <strong>${esc(c.name)}</strong>
+              <div style="font-size:11px; color:var(--text-muted);">Tipo: <code>${esc(c.connector_type)}</code> · Secreto: ${esc(c.secret_hint)}</div>
+            </div>
+            <span class="badge ${c.is_enabled ? "badge-ok" : "badge-neutral"}">${c.is_enabled ? "Habilitado" : "Deshabilitado"}</span>
+          </div>
+          <div class="code-box" style="max-height:110px; margin-bottom:10px;">${esc(JSON.stringify(c.settings_json || {}, null, 2))}</div>
+          <div style="display:flex; gap:6px; justify-content:flex-end;">
+            <button class="btn btn-sm" onclick="testConnectorById(${c.id})">🔌 Probar Conexión</button>
+            <button class="btn btn-sm" onclick="toggleConnectorEnabled(${c.id}, ${!c.is_enabled})">
+              ${c.is_enabled ? "⏸ Desactivar" : "▶ Activar"}
+            </button>
+            <button class="btn btn-primary btn-sm" onclick="promptConnectorSecret(${c.id}, '${esc(c.name)}')">🔑 Configurar Token/Clave</button>
+          </div>
+        </div>`
+      )
+      .join("");
+
+    const rblData = await apiFetch("/api/v1/ingest/rbl-episodes");
+    const rblBody = document.getElementById("rblEpisodesBody");
+    const eps = rblData.episodes || [];
+    rblBody.innerHTML = eps.length
+      ? eps
+          .map(
+            (r) => `
+          <tr>
+            <td>#${r.id}</td>
+            <td><code>${esc(r.ip_address)}</code></td>
+            <td>${esc(r.server_name)}</td>
+            <td>${orgBadge(r.organization)}</td>
+            <td><strong>${esc(r.rbl_provider)}</strong></td>
+            <td><span class="badge ${r.status === "active" ? "badge-high" : "badge-ok"}">${esc(r.status)}</span></td>
+            <td><strong>${r.check_count}</strong> chequeo(s)</td>
+            <td>${r.iris_alert_id ? "Alerta #" + r.iris_alert_id : "—"}</td>
+            <td>${esc((r.last_seen_at || "").replace("T", " ").slice(0, 19))}</td>
+          </tr>`
+          )
+          .join("")
+      : `<tr><td colspan="9" style="color:var(--text-muted); text-align:center;">Sin episodios RBL registrados. Haz clic en "Simular Evento RBL" para probar la deduplicación.</td></tr>`;
+  } catch (e) {
+    showToast("Error cargando conectores: " + e.message);
+  }
+}
+
+async function testConnectorById(id) {
+  try {
+    const res = await apiFetch(`/api/v1/admin/connectors/${id}/test`, { method: "POST" });
+    showToast(`${res.ok ? "✅ Conectado" : "⚠️ Aviso"}: ${res.message || res.status}`);
+    await loadConnectorsView();
+  } catch (e) {
+    showToast("Error probando conector: " + e.message);
+  }
+}
+
+async function toggleConnectorEnabled(id, enabled) {
+  await apiFetch(`/api/v1/admin/connectors/${id}`, {
+    method: "PUT",
+    body: JSON.stringify({ is_enabled: enabled }),
+  });
+  showToast("Estado del conector actualizado.");
+  await loadConnectorsView();
+}
+
+async function promptConnectorSecret(id, name) {
+  const sec = prompt(`Ingresa el Token / API Key / Contraseña para '${name}' (se almacenará cifrado con Fernet/AES):`);
+  if (!sec || !sec.trim()) return;
+  await apiFetch(`/api/v1/admin/connectors/${id}`, {
+    method: "PUT",
+    body: JSON.stringify({ secret_value: sec.trim(), is_enabled: true }),
+  });
+  showToast(`Credencial cifrada y guardada para ${name}.`);
+  await loadConnectorsView();
+}
+
+async function simulateRblWebhookEvent() {
+  const res = await apiFetch("/api/v1/webhooks/blacklist-master", {
+    method: "POST",
+    body: JSON.stringify({
+      ip_address: "174.136.26.134",
+      rbl_provider: "Spamhaus ZEN",
+      server_name: "svgr252.serverneubox.com.mx",
+      organization: "NBX",
+      event_status: "listed",
+      reason: "Detección de envío SMTP en IP compartida",
+    }),
+  });
+  showToast(
+    res.is_new_episode
+      ? `Nuevo episodio RBL #${res.episode_id} creado (Alerta IRIS #${res.iris_alert_id})`
+      : `Episodio RBL #${res.episode_id} deduplicado (Conteo incrementado a ${res.check_count}, 0 alertas duplicadas)`
+  );
+  await loadConnectorsView();
+}
+
+// =========================================================
+// 7. ADMINISTRACIÓN, GEMINI API, USUARIOS Y AUDITORÍA
+// =========================================================
+async function loadAdminView() {
+  try {
+    const g = await apiFetch("/api/v1/admin/gemini");
+    const cfg = g.gemini || {};
+    updateGeminiTopbar(cfg);
+    document.getElementById("geminiModelSelect").value = cfg.model || "gemini-2.5-flash";
+    document.getElementById("geminiEnabledSelect").value = String(Boolean(cfg.is_enabled));
+
+    const audit = await apiFetch("/api/v1/admin/audit-logs");
+    document.getElementById("adminAuditBody").innerHTML = (audit.logs || [])
+      .map(
+        (l) => `
+        <tr>
+          <td>#${l.id}</td>
+          <td style="font-size:11.5px;">${esc((l.timestamp || "").replace("T", " ").slice(0, 19))}</td>
+          <td><strong>${esc(l.username)}</strong></td>
+          <td><span class="badge badge-info">${esc(l.module)}</span></td>
+          <td><code>${esc(l.action)}</code></td>
+          <td>${l.organization ? orgBadge(l.organization) : "—"}</td>
+          <td>${l.iris_case_id ? "Caso #" + l.iris_case_id : l.iris_alert_id ? "Alerta #" + l.iris_alert_id : "—"}</td>
+          <td>${esc(l.details)}</td>
+        </tr>`
+      )
+      .join("");
+
+    try {
+      const uData = await apiFetch("/api/v1/auth/users");
+      document.getElementById("adminUsersBody").innerHTML = (uData.users || [])
+        .map(
+          (u) => `
+          <tr>
+            <td><strong>${esc(u.username)}</strong></td>
+            <td>${esc(u.full_name)}</td>
+            <td><span class="badge badge-purple">${esc(u.role)}</span></td>
+            <td>${(u.allowed_orgs || []).join(", ")}</td>
+            <td><span class="badge ${u.is_active ? "badge-ok" : "badge-high"}">${u.is_active ? "Activo" : "Inactivo"}</span></td>
+          </tr>`
+        )
+        .join("");
+    } catch (_) {
+      document.getElementById("adminUsersBody").innerHTML = `<tr><td colspan="5" style="color:var(--text-muted);">Inicia sesión con rol Supervisor o Admin para administrar usuarios.</td></tr>`;
+    }
+  } catch (e) {
+    showToast("Error cargando vista de administración: " + e.message);
+  }
+}
+
+async function saveGeminiConfig() {
+  const key = document.getElementById("geminiApiKeyInput").value.trim();
+  const model = document.getElementById("geminiModelSelect").value;
+  const enabled = document.getElementById("geminiEnabledSelect").value === "true";
+
+  try {
+    const res = await apiFetch("/api/v1/admin/gemini", {
+      method: "PUT",
+      body: JSON.stringify({
+        api_key: key || undefined,
+        model,
+        is_enabled: enabled,
+      }),
+    });
+    document.getElementById("geminiApiKeyInput").value = "";
+    updateGeminiTopbar(res.gemini || {});
+    showToast("Configuración de Google Gemini guardada y cifrada en base de datos.");
+  } catch (e) {
+    showToast("Error guardando Gemini: " + e.message);
+  }
+}
+
+async function testGeminiApi() {
+  const msgEl = document.getElementById("geminiTestStatusMsg");
+  if (msgEl) msgEl.textContent = "Probando conexión con Google Gemini API...";
+  try {
+    const res = await apiFetch("/api/v1/admin/gemini/test", { method: "POST" });
+    if (msgEl) {
+      msgEl.textContent = res.ok
+        ? `✅ Conectado a ${res.model} (${res.key_hint})`
+        : `⚠️ ${res.message}`;
+    }
+    showToast(res.ok ? "Conexión exitosa con Google Gemini API" : res.message);
+  } catch (e) {
+    if (msgEl) msgEl.textContent = "Error: " + e.message;
+  }
+}
+
+// =========================================================
+// AUTENTICACIÓN MODAL
+// =========================================================
+function openLoginModal() {
+  document.getElementById("loginModal").classList.add("open");
+}
+
+function closeLoginModal() {
+  document.getElementById("loginModal").classList.remove("open");
+}
+
+async function submitLogin() {
+  const username = document.getElementById("loginUsername").value.trim();
+  const password = document.getElementById("loginPassword").value;
+  try {
+    const res = await apiFetch("/api/v1/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    });
+    SOC_STATE.currentUser = res.user;
+    SOC_STATE.csrfToken = res.csrf_token;
+    updateUserUi();
+    closeLoginModal();
+    showToast(`Bienvenido, ${res.user.full_name} (Rol: ${res.user.role})`);
+    if (SOC_STATE.currentView === "admin") loadAdminView();
+  } catch (e) {
+    showToast("Error de autenticación: " + e.message);
+  }
+}
+
+function updateUserUi() {
+  const lbl = document.getElementById("currentUserLabel");
+  const btn = document.getElementById("sidebarAuthBtn");
+  if (SOC_STATE.currentUser) {
+    if (lbl) lbl.textContent = `${SOC_STATE.currentUser.username} (${SOC_STATE.currentUser.role})`;
+    if (btn) {
+      btn.textContent = "🚪 Cerrar Sesión (" + SOC_STATE.currentUser.username + ")";
+      btn.onclick = async () => {
+        await apiFetch("/api/v1/auth/logout", { method: "POST" });
+        SOC_STATE.currentUser = null;
+        SOC_STATE.csrfToken = null;
+        if (lbl) lbl.textContent = "Sesión Local SOC";
+        btn.textContent = "🔐 Iniciar Sesión SOC";
+        btn.onclick = openLoginModal;
+        showToast("Sesión cerrada.");
+      };
+    }
+  }
+}
+
+document.addEventListener("DOMContentLoaded", initSocConsole);

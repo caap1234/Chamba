@@ -10,4 +10,17 @@ venv/
 secops/iris_abuse_sync/scratch/*
 !secops/iris_abuse_sync/scratch/.gitkeep
 secops/iris_abuse_sync/.service.pid
+secops/iris_abuse_sync/storage/*.db*
+secops/iris_abuse_sync/storage/backups/*
+!secops/iris_abuse_sync/storage/backups/.gitkeep
+secops/iris_abuse_sync/storage/migration_backups/*
+!secops/iris_abuse_sync/storage/migration_backups/.gitkeep
+secops/iris_abuse_sync/storage/evidences/*
+!secops/iris_abuse_sync/storage/evidences/.gitkeep
+secops/iris_abuse_sync/storage/reports/*
+!secops/iris_abuse_sync/storage/reports/.gitkeep
+secops/iris_abuse_sync/storage/retention_config.json
+secops/iris_abuse_sync/frontend/node_modules/
+secops/iris_abuse_sync/frontend/dist/
+*.tar.gz
 

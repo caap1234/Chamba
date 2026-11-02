@@ -34,6 +34,50 @@ class IrisClient:
         self.session = requests.Session()
         self.session.verify = self.verify_ssl
 
+    @staticmethod
+    def _params_store_path() -> Path:
+        store_dir = config.BASE_DIR / "scratch"
+        store_dir.mkdir(parents=True, exist_ok=True)
+        return store_dir / "case_params_store.json"
+
+    @classmethod
+    def _load_all_case_params(cls) -> Dict[str, Dict[str, Any]]:
+        path = cls._params_store_path()
+        if not path.is_file():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception as e:
+            logger.warning(f"Could not read case_params_store.json: {e}")
+            return {}
+
+    @classmethod
+    def _load_case_params(cls, case_id: int) -> Dict[str, Any]:
+        store = cls._load_all_case_params()
+        val = store.get(str(case_id))
+        return val if isinstance(val, dict) else {}
+
+    @classmethod
+    def _save_case_params(cls, case_id: int, params: Dict[str, Any]) -> None:
+        if not case_id or not isinstance(params, dict):
+            return
+        store = cls._load_all_case_params()
+        key = str(case_id)
+        existing = store.get(key) if isinstance(store.get(key), dict) else {}
+        merged = {**existing}
+        for k, v in params.items():
+            if v is not None:
+                merged[k] = v
+        store[key] = merged
+        try:
+            cls._params_store_path().write_text(
+                json.dumps(store, ensure_ascii=False, indent=2),
+                encoding="utf-8"
+            )
+        except Exception as e:
+            logger.warning(f"Could not write case_params_store.json: {e}")
+
     @property
     def headers(self) -> Dict[str, str]:
         headers = {
@@ -178,6 +222,39 @@ class IrisClient:
                 "error": f"Failed to create case in DFIR-IRIS. Details: {error_msg}",
                 "payload": post_data
             }
+
+        # 3.1. Ensure clean case_description (without template's empty placeholder block) and custom_attributes
+        try:
+            clean_up = {
+                "case_name": post_data["case_name"],
+                "case_description": post_data["case_description"],
+                "case_soc_id": post_data["case_soc_id"]
+            }
+            if "custom_attributes" in post_data:
+                clean_up["custom_attributes"] = post_data["custom_attributes"]
+            self.session.post(
+                f"{self.base_url}/manage/cases/update/{case_id}",
+                headers=self.headers,
+                json=clean_up,
+                timeout=8
+            )
+        except Exception as err:
+            logger.debug(f"Post-create cleanup update skipped for case {case_id}: {err}")
+
+        # 3.2. Persist full case parameters locally so ID de Cliente, ID de Servicio, Servidor, etc. are always retained
+        meta = case_payload.get("metadata") or {}
+        sec01 = (case_payload.get("custom_attributes") or {}).get("01 Identificación") or {}
+        self._save_case_params(case_id, {
+            "report_ticket": str(meta.get("ticket_id") or sec01.get("Ticket de abuso") or post_data.get("case_soc_id") or ""),
+            "client_ticket": str(meta.get("client_ticket") or sec01.get("Ticket del titular") or ""),
+            "client_id": str(meta.get("client_id") or sec01.get("ID de Cliente") or ""),
+            "service_id": str(meta.get("service_id") or sec01.get("ID de Servicio") or ""),
+            "server": str(meta.get("server") or sec01.get("Servidor") or ""),
+            "affected_asset": str(meta.get("affected_asset") or sec01.get("Dominio o activo reportado") or ""),
+            "primary_ip": str(sec01.get("IP reportada") or ""),
+            "customer_key": str(case_payload.get("customer_key") or ""),
+            "custom_attributes": case_payload.get("custom_attributes") or {}
+        })
 
         # 4. Attach / Sync Notes
         notes_created = self.sync_case_notes(case_id, case_payload.get("notes", []))
@@ -714,8 +791,139 @@ class IrisClient:
                                 "directory_id": n.get("directory_id"),
                                 "directory_name": n.get("directory", {}).get("name") if isinstance(n.get("directory"), dict) else ""
                             })
+                        notes.sort(key=lambda x: (x.get("note_title") or "").strip().lower())
             except Exception as e:
                 logger.warning(f"Error fetching notes for case {case_id}: {e}")
+
+            # Normalize custom_attributes into simple {tab: {key: value}} dict
+            import re
+            raw_desc = case_data.get("description") or ""
+            cleaned_desc = re.sub(
+                r"\n*##\s*Resumen del caso\s*\n-\s*Reporte:\s*\n-\s*Activo afectado:\s*\n-\s*Hallazgo:\s*\n-\s*Acci[oó]n y resultado:\s*$",
+                "",
+                raw_desc,
+                flags=re.IGNORECASE
+            ).strip()
+            case_data["description"] = cleaned_desc
+            case_data["case_description"] = cleaned_desc
+
+            raw_attrs = case_data.get("custom_attributes") or {}
+            normalized_attrs: Dict[str, Dict[str, str]] = {}
+            if isinstance(raw_attrs, dict):
+                for tab_name, fields in raw_attrs.items():
+                    if isinstance(fields, dict):
+                        normalized_attrs[tab_name] = {}
+                        for f_key, f_val in fields.items():
+                            if isinstance(f_val, dict):
+                                normalized_attrs[tab_name][f_key] = str(f_val.get("value") or "")
+                            else:
+                                normalized_attrs[tab_name][f_key] = str(f_val or "")
+
+            if "01 Identificación" not in normalized_attrs:
+                normalized_attrs["01 Identificación"] = {}
+            sec01 = normalized_attrs["01 Identificación"]
+
+            # Parse description & notes to recover any parameters (Servidor, ID de Cliente, ID de Servicio, etc.)
+            combined_notes_text = cleaned_desc + "\n" + "\n".join(n.get("note_content") or "" for n in notes)
+
+            def _rx(pattern: str) -> str:
+                m = re.search(pattern, combined_notes_text, flags=re.IGNORECASE)
+                return m.group(1).strip() if m else ""
+
+            rx_server = _rx(r"(?:Alojado en servidor|Servidor)\s*:?\s*([a-zA-Z0-9._-]+)")
+            rx_client_id = _rx(r"ID\s*(?:del\s*)?cliente\s*:\s*#?([a-zA-Z0-9_-]+)")
+            rx_service_id = _rx(r"ID\s*(?:del\s*)?servicio\s*:\s*#?([a-zA-Z0-9_-]+)")
+            rx_client_ticket = (
+                _rx(r"Ticket\s*(?:del\s*)?titular[^:\n]*:\s*#?(\d+)")
+                or _rx(r"Comunicaci[oó]n\s*/\s*ticket[^:\n]*:\s*Ticket\s+\w+\s+#?(\d+)")
+            )
+            rx_report_ticket = _rx(r"-\s*Ticket de abuso:\s*(\d+)")
+            rx_ip = _rx(r"IP\s+asociada\s*:\s*([0-9]{1,3}(?:\.[0-9]{1,3}){3})")
+            if not rx_ip:
+                rx_ip = _rx(r"-\s*Activo afectado:[^\n(]*\(([0-9]{1,3}(?:\.[0-9]{1,3}){3})\)")
+
+            title_asset = ""
+            m_title_asset = re.search(r"\]\s*([^\s|]+)\s*\|", case_data.get("name") or "")
+            if m_title_asset:
+                title_asset = m_title_asset.group(1).strip()
+
+            stored = self._load_case_params(case_id)
+            stored_custom = (stored.get("custom_attributes") or {}).get("01 Identificación") or {}
+
+            report_ticket_val = (
+                stored.get("report_ticket")
+                or stored_custom.get("Ticket de abuso")
+                or sec01.get("Ticket de abuso")
+                or rx_report_ticket
+                or case_data.get("soc_id")
+                or ""
+            )
+            client_ticket_val = (
+                stored.get("client_ticket")
+                or stored_custom.get("Ticket del titular")
+                or sec01.get("Ticket del titular")
+                or rx_client_ticket
+                or ""
+            )
+            client_id_val = (
+                stored.get("client_id")
+                or stored_custom.get("ID de Cliente")
+                or sec01.get("ID de Cliente")
+                or rx_client_id
+                or ""
+            )
+            service_id_val = (
+                stored.get("service_id")
+                or stored_custom.get("ID de Servicio")
+                or sec01.get("ID de Servicio")
+                or rx_service_id
+                or ""
+            )
+            server_val = (
+                stored.get("server")
+                or stored_custom.get("Servidor")
+                or sec01.get("Servidor")
+                or rx_server
+                or ""
+            )
+            asset_val = (
+                stored.get("affected_asset")
+                or stored_custom.get("Dominio o activo reportado")
+                or title_asset
+                or sec01.get("Dominio o activo reportado")
+                or ""
+            )
+            ip_val = (
+                stored.get("primary_ip")
+                or stored_custom.get("IP reportada")
+                or sec01.get("IP reportada")
+                or rx_ip
+                or ""
+            )
+
+            # Merge any extra custom attributes saved locally
+            for k_ext, v_ext in stored_custom.items():
+                if v_ext and not sec01.get(k_ext):
+                    sec01[k_ext] = str(v_ext)
+
+            sec01["Ticket de abuso"] = str(report_ticket_val)
+            sec01["Dominio o activo reportado"] = str(asset_val)
+            sec01["IP reportada"] = str(ip_val)
+            sec01["Ticket del titular"] = str(client_ticket_val)
+            sec01["ID de Cliente"] = str(client_id_val)
+            sec01["ID de Servicio"] = str(service_id_val)
+            sec01["Servidor"] = str(server_val)
+
+            case_data["normalized_attributes"] = normalized_attrs
+            case_data["case_params"] = {
+                "report_ticket": str(report_ticket_val),
+                "client_ticket": str(client_ticket_val),
+                "client_id": str(client_id_val),
+                "service_id": str(service_id_val),
+                "affected_asset": str(asset_val),
+                "server": str(server_val),
+                "primary_ip": str(ip_val)
+            }
 
             return {
                 "success": True,
@@ -753,7 +961,8 @@ class IrisClient:
 
     def update_case(self, case_id: int, updates: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Updates case details (name, description, state_id) and syncs notes in DFIR-IRIS.
+        Updates case details (name, description, state_id, customer, attributes, IOCs)
+        and syncs notes in DFIR-IRIS.
         """
         try:
             # 1. Sync notes if provided
@@ -761,16 +970,76 @@ class IrisClient:
             if "notes" in updates and isinstance(updates["notes"], list):
                 synced_notes = self.sync_case_notes(case_id, updates["notes"])
 
-            # 2. Update case metadata
+            # 2. Add new IOCs if provided
+            iocs_added = []
+            if "add_iocs" in updates and isinstance(updates["add_iocs"], list):
+                for ioc in updates["add_iocs"]:
+                    val = ioc.get("value") or ioc.get("ioc_value")
+                    t = ioc.get("type") or ioc.get("ioc_type") or "other"
+                    d = ioc.get("description") or ioc.get("ioc_description") or ""
+                    if val and self._add_ioc(case_id, val, t, d):
+                        iocs_added.append(f"{t}:{val}")
+
+            # 3. Delete removed IOCs if provided
+            iocs_deleted = []
+            if "delete_ioc_ids" in updates and isinstance(updates["delete_ioc_ids"], list):
+                for ioc_id in updates["delete_ioc_ids"]:
+                    if not ioc_id:
+                        continue
+                    try:
+                        r_del = self.session.post(
+                            f"{self.base_url}/case/ioc/delete/{ioc_id}?cid={case_id}",
+                            headers=self.headers,
+                            json={},
+                            timeout=8
+                        )
+                        if r_del.status_code in (200, 201):
+                            iocs_deleted.append(ioc_id)
+                    except Exception as err:
+                        logger.warning(f"Failed deleting IOC #{ioc_id} in case #{case_id}: {err}")
+
+            # 4. Update case metadata
             post_data = {}
             if "case_name" in updates or "name" in updates:
                 post_data["case_name"] = updates.get("case_name") or updates.get("name")
             if "case_description" in updates or "description" in updates:
                 post_data["case_description"] = updates.get("case_description") or updates.get("description")
-            if "state_id" in updates:
+            if "state_id" in updates and updates["state_id"] is not None:
                 post_data["state_id"] = updates["state_id"]
-            if "case_soc_id" in updates:
-                post_data["case_soc_id"] = updates["case_soc_id"]
+            if "case_soc_id" in updates and updates["case_soc_id"] is not None:
+                post_data["case_soc_id"] = str(updates["case_soc_id"])
+            if "case_customer" in updates and updates["case_customer"] is not None:
+                post_data["case_customer"] = int(updates["case_customer"])
+            if "custom_attributes" in updates and updates["custom_attributes"]:
+                post_data["custom_attributes"] = updates["custom_attributes"]
+
+            # 4.1. Persist case_params and custom_attributes locally so all fields (ID de Cliente, ID de Servicio, Servidor, etc.) persist across reloads
+            cp = updates.get("case_params") if isinstance(updates.get("case_params"), dict) else {}
+            ca_sec01 = (updates.get("custom_attributes") or {}).get("01 Identificación") if isinstance(updates.get("custom_attributes"), dict) else {}
+            ca_sec01 = ca_sec01 if isinstance(ca_sec01, dict) else {}
+            if cp or ca_sec01 or updates.get("case_soc_id") is not None:
+                save_payload: Dict[str, Any] = {}
+                if cp.get("report_ticket") is not None or ca_sec01.get("Ticket de abuso") is not None:
+                    save_payload["report_ticket"] = str(cp.get("report_ticket") if cp.get("report_ticket") is not None else ca_sec01.get("Ticket de abuso", ""))
+                elif updates.get("case_soc_id") is not None:
+                    save_payload["report_ticket"] = str(updates["case_soc_id"])
+                if cp.get("client_ticket") is not None or ca_sec01.get("Ticket del titular") is not None:
+                    save_payload["client_ticket"] = str(cp.get("client_ticket") if cp.get("client_ticket") is not None else ca_sec01.get("Ticket del titular", ""))
+                if cp.get("client_id") is not None or ca_sec01.get("ID de Cliente") is not None:
+                    save_payload["client_id"] = str(cp.get("client_id") if cp.get("client_id") is not None else ca_sec01.get("ID de Cliente", ""))
+                if cp.get("service_id") is not None or ca_sec01.get("ID de Servicio") is not None:
+                    save_payload["service_id"] = str(cp.get("service_id") if cp.get("service_id") is not None else ca_sec01.get("ID de Servicio", ""))
+                if cp.get("server") is not None or ca_sec01.get("Servidor") is not None:
+                    save_payload["server"] = str(cp.get("server") if cp.get("server") is not None else ca_sec01.get("Servidor", ""))
+                if cp.get("affected_asset") is not None or ca_sec01.get("Dominio o activo reportado") is not None:
+                    save_payload["affected_asset"] = str(cp.get("affected_asset") if cp.get("affected_asset") is not None else ca_sec01.get("Dominio o activo reportado", ""))
+                if cp.get("primary_ip") is not None or ca_sec01.get("IP reportada") is not None:
+                    save_payload["primary_ip"] = str(cp.get("primary_ip") if cp.get("primary_ip") is not None else ca_sec01.get("IP reportada", ""))
+                if cp.get("customer_key"):
+                    save_payload["customer_key"] = str(cp["customer_key"])
+                if updates.get("custom_attributes"):
+                    save_payload["custom_attributes"] = updates["custom_attributes"]
+                self._save_case_params(case_id, save_payload)
 
             if post_data:
                 r = self.session.post(
@@ -779,13 +1048,27 @@ class IrisClient:
                     json=post_data,
                     timeout=10
                 )
+                # If custom_attributes or case_customer caused a validation issue, retry core fields
+                if r.status_code not in (200, 201) and ("custom_attributes" in post_data or "case_customer" in post_data):
+                    fallback_data = {
+                        k: v for k, v in post_data.items()
+                        if k in ("case_name", "case_description", "state_id", "case_soc_id")
+                    }
+                    r = self.session.post(
+                        f"{self.base_url}/manage/cases/update/{case_id}",
+                        headers=self.headers,
+                        json=fallback_data,
+                        timeout=10
+                    )
                 if r.status_code not in (200, 201):
                     return {"success": False, "error": f"Error actualizando metadatos del caso: HTTP {r.status_code} {r.text}"}
 
             return {
                 "success": True,
                 "message": f"Caso #{case_id} actualizado exitosamente",
-                "notes_updated": synced_notes
+                "notes_updated": synced_notes,
+                "iocs_added": iocs_added,
+                "iocs_deleted": iocs_deleted
             }
         except Exception as e:
             return {"success": False, "error": str(e)}

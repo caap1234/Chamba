@@ -1,239 +1,134 @@
-# DFIR-IRIS Abuse Sync — SOC Neubox Automation
+# DFIR-IRIS Abuse Sync — SOC Platform v3.1 (NEUBOX & Hospedando)
 
-Sistema integral y modular para automatizar la extracción de datos desde tickets de abuso en formato **PDF** (Helpdesk Neubox) y la creación de casos estructurados en **DFIR-IRIS**, utilizando los templates oficiales de **SOC Abuse Lite v2.0**.
+Plataforma unificada de respuesta a incidentes, triage forense, gobernanza de casos, gestión de abusos y generación automatizada de informes ejecutivos para Centros de Operaciones de Seguridad (SOC), optimizada para:
 
-Diseñado para ejecutarse tanto **en local (macOS/Linux)** como en **servidores VPS** (vía Docker, daemon o CLI).
-
----
-
-## 🌟 Características Principales
-
-1. **Suite Completa de Interacción**:
-   - 🖥️ **Web UI (SPA)**: Panel visual con diseño Dark Mode SOC, zona de Drag & Drop para PDFs, previsualización de datos, selector de templates y creación con un clic.
-   - ⚡ **CLI Avanzada (`cli.py`)**: Analizador rápido por consola con salida en color, soporte para modo simulación (`--dry-run`), forzado manual de templates y procesamiento en lote (`batch`).
-   - 👁️ **Folder Watcher Daemon (`watcher.py`)**: Servicio en segundo plano que monitorea la carpeta `inbox/`. Cualquier ticket PDF depositado se procesa automáticamente, crea el caso en DFIR-IRIS y se mueve a `processed/` con comprobante JSON.
-   - 🐳 **Contenedor Docker & Compose**: Listo para desplegar en cualquier VPS sin preocuparse por dependencias.
-
-2. **Parser Heurístico de Alta Precisión**:
-   - Extrae automáticamente:
-     - Número de Ticket y URL (`Ticket 789034`, etc.)
-     - Activo afectado (dominio, IP o cuenta autenticada)
-     - Reportante y organización (PhishFort, BrutalRx, CTIR Gov, etc.)
-     - Servidores internos de hosting Neubox (`svgp261`, `svgs311`, `svds058`, etc.)
-     - Cuentas de correo autenticadas comprometidas (`X-Authenticated-Id`)
-     - Ticket del cliente en panel de Hospedando (`id=666491`)
-     - Reportes de análisis automático de Bastion (Nlab Bot)
-     - Cabeceras completas de correo SMTP (DKIM, Received, SPF, DMARC)
-     - Indicadores de compromiso (IOCs: dominios, IPs, URLs, emails).
-
-3. **Clasificador Automático Multi-Template (SOC Abuse Lite v2.0)**:
-   - `[PHISH]` **`abuse_phishing`**: Páginas de captura de credenciales o suplantación web.
-   - `[SPAM]` **`abuse_spam`**: Cuentas vulneradas enviando spam (ej. dating spam, envíos masivos).
-   - `[FRAUD]` **`abuse_fraud`**: Venta no autorizada de medicamentos / esteroides (COFEPRIS), estafas.
-   - `[BRAND]` **`abuse_trademark`**: Denuncias de uso de marca / copyright (ej. PhishFort Don Julio / Diageo).
-   - `[MAL]` **`abuse_malware`**: Sitios comprometidos, webshells o enlaces maliciosos.
-   - `[NET]` **`abuse_network`**: Tráfico abusivo, ataques de fuerza bruta o escaneo de puertos.
-   - `[TAKE]` **`abuse_takedown`**: Notificaciones formales de CSIRT / CERT / Gobierno (ej. CTIR Gov BR TLP:AMBER).
-   - *(Opcional)* Conexión con LLM (Gemini / OpenAI / Ollama) para refinamiento contextual.
-
-4. **Formato Estructurado de Notas y Atributos**:
-   - **Nota 01**: `01 Reporte inicial` (Ticket, reportante, activo, URL/IP reportada y síntesis).
-   - **Nota 02**: `02 Investigación y evidencia` (Servidor Neubox, IP, bloque de Bastion o cabeceras).
-   - **Nota 03**: `03 Acciones y resolución` (Estructura de gestión y ticket del titular).
-   - **Atributos Personalizados**: `01 Identificación` (`Ticket de abuso`, `Dominio o activo`, `IP reportada`, `Ticket del titular`).
-   - **Evidencia Adjunta**: Carga automática del archivo PDF original al caso en IRIS.
+- **NEUBOX (`NBX`)** — DFIR-IRIS Customer ID `2`.
+- **Hospedando (`HP`)** — DFIR-IRIS Customer ID `3`.
+- **Integración Nativa DFIR-IRIS:** Compatible con DFIR-IRIS `v2.4.29+` (REST API v2.0+).
 
 ---
 
-## 📁 Estructura del Proyecto
+## 🚀 Arquitectura y Capacidades Principales (v3.1)
 
-```
-iris_abuse_sync/
-├── cli.py             # CLI interactiva para consola
-├── web.py             # Servidor Web FastAPI & API REST
-├── watcher.py         # Daemon de monitoreo de carpetas
-├── parser.py          # Extractor de metadatos, timeline e IOCs
-├── classifier.py      # Motor de clasificación y selección de template
-├── case_builder.py    # Constructor de casos y notas en formato SOC Lite v2.0
-├── iris_client.py     # Cliente REST API para DFIR-IRIS (v2 y legacy)
-├── config.py          # Gestor de configuración y variables de entorno
-├── start.sh           # Script de conveniencia para arranque rápido
-├── .env.example       # Plantilla de variables de entorno
-├── Dockerfile         # Imagen optimizada para VPS
-├── docker-compose.yml # Despliegue con Docker Compose
-├── requirements.txt   # Dependencias de Python
-├── inbox/             # Carpeta de entrada para el watcher
-├── processed/         # Tickets procesados exitosamente (con comprobante JSON)
-├── errors/            # Tickets que presentaron error
-├── static/            # Interfaz gráfica moderna (HTML/CSS/JS)
-└── templates/         # Templates oficiales JSON (SOC Abuse Lite v2.0)
-```
+1. **Expediente de Caso Integral & Taxonomía de 4 Ejes:**
+   - Eje 1 (Actividad Reportada), Eje 2 (Incidente Confirmado), Eje 3 (Vector de Entrada) y Eje 4 (Causa Raíz).
+   - Ficha lateral deslizante del Activo & Cliente (`AssetSheetDrawer`) con accesos directos al panel WHMCS, cPanel/DirectAdmin y expediente DFIR-IRIS sin opacar la pantalla de investigación.
+
+2. **Bitácora Forense Unificada & Editor WYSIWYG en Tiempo Real:**
+   - Registro unificado de Investigación técnica, Acciones operativas, Evidencias forenses y Comunicaciones con cliente/reportante.
+   - Editor WYSIWYG integrado en línea (sin modales invasivos) que interpreta Markdown visualmente al instante (negritas, encabezados, bloques de código, listas).
+   - Sincronización automática no destructiva con la Ficha Operativa Integrada en DFIR-IRIS Notes.
+   - Selección múltiple de actividades y eliminación por lotes.
+   - Vinculación y desvinculación selectiva con filtro por pestañas contra los pasos de playbooks.
+
+3. **Catálogo de 11 Playbooks Estandarizados del SOC:**
+   - Procedimientos supervisados de 5 pasos estructurados por categoría:
+     1. **Phishing** (`abuse_phishing`): Validación DNS/URL, elementos de suplantación, preservación SHA-256, análisis de compromiso y contención.
+     2. **Sitio comprometido** (`web_compromise`): Identificación de webshells/malware, auditoría de logs/fechas CMS y cuarentena.
+     3. **Spam** (`abuse_spam`): Análisis de cabeceras SMTP, cola Exim, origen de envíos, bloqueo y rotación de credenciales.
+     4. **Acceso no autorizado** (`account_compromise`): Auditoría de accesos panel/SSH, correlación de IPs y reversión de cambios DNS/2FA.
+     5. **Autoridades** (`authority_req`): Atención y validación formal de requerimientos de fiscalías/reguladores y preservación legal.
+     6. **Disputa de marca** (`brand_dispute`): Verificación de titularidad, descarte de phishing activo y orientación WIPO/OMPI.
+     7. **IP en blacklist** (`blacklist_rbl`): Diagnóstico en vivo contra listas RBL (Spamhaus, Barracuda, SpamCop), mitigación y solicitud de delisting.
+     8. **Fraude / Scam** (`abuse_fraud`): Denuncias comerciales, análisis de engaño/cobros y requerimiento de documentación mercantil.
+     9. **Productos regulados** (`regulated_products`): Comercialización de medicamentos/sustancias y verificación de términos de servicio.
+     10. **Abuso de red** (`network_abuse`): Escaneos de puertos, ataques de fuerza bruta y mitigación perimetral.
+     11. **Derechos de autor** (`copyright_complaint`): Reclamos de propiedad intelectual y retiro de material protegido.
+
+4. **Copiloto SOC Flotante (Google Gemini AI):**
+   - Burbuja flotante e interactiva en la esquina inferior derecha disponible en toda la plataforma.
+   - Asistente contextual con conocimiento en vivo del expediente activo: genera líneas de tiempo forenses automáticas, sugiere acciones de mitigación, redacta respuestas formales para clientes y analiza logs técnicos.
+   - Renderizado completo de Markdown, bloques de código monoespaciados y botón de limpieza de conversación.
+
+5. **Gestor de Indicadores de Compromiso (IoCs):**
+   - Extracción y gestión de IoCs en tiempo real con sincronización nativa a los IoCs oficiales de DFIR-IRIS.
+   - Generación asistida de Timeline de incidentes con eventos correlacionados.
+
+6. **Generador de Dictámenes e Informes PDF:**
+   - Compilación de reportes ejecutivos en PDF con membrete institucional, tablas de hallazgos técnicos estructurados y renderizado directo de capturas de pantalla desde el Datastore oficial.
+   - Paginación dinámica en tablas de casos, alertas e informes para escalabilidad con miles de expedientes.
+
+7. **Gobernanza Centralizada & Control de Acceso (RBAC):**
+   - Directorio de usuarios y roles (`admin`, `supervisor`, `analyst`, `readonly`) con asignación de organizaciones permitidas (`NBX`, `HP`).
+   - Gestión completa de contraseñas y altas directamente desde la interfaz web.
+   - Seguridad de instalación: la contraseña de administrador definida en `.env` solo se utiliza en el primer bootstrap, impidiendo sobreescrituras accidentales en reinicios.
+
+8. **Retención de Evidencias & Purga Forense Segura:**
+   - Políticas configurables de retención local con generación de respaldos comprimidos (`.tar.gz`) con manifiesto criptográfico SHA-256 antes del purgado de binarios.
 
 ---
 
-## 🚀 Instalación y Puesta en Marcha
+## 🛠️ Instalación Rápida en Servidor VPS
 
-### 1. Configuración de credenciales (.env)
-
-Copia `.env.example` a `.env` y configura los datos de tu instancia de DFIR-IRIS:
+La plataforma incluye un instalador interactivo automatizado para entornos de producción en VPS (AlmaLinux, Rocky, Debian, Ubuntu):
 
 ```bash
-cp .env.example .env
-nano .env
+# 1. Clonar el repositorio
+git clone https://github.com/caap1234/Chamba.git
+cd Chamba/secops/iris_abuse_sync
+
+# 2. Ejecutar el asistente de instalación interactivo
+chmod +x setup_vps.sh
+./setup_vps.sh
 ```
 
-Parámetros clave:
-```ini
-IRIS_URL=https://iris.neubox.com
-IRIS_API_KEY=tu_token_de_api_generado_en_iris
-IRIS_CUSTOMER_ID=1
-IRIS_VERIFY_SSL=false
-WEB_PORT=8080
-```
+El asistente `setup_vps.sh` configura de forma guiada:
+- **Dominio / FQDN** y puerto del aplicativo.
+- **Usuario y contraseña inicial de administrador** (generador criptográfico aleatorio).
+- **Conexión API con DFIR-IRIS** y llave de Gemini AI (opcional).
+- **Generación de archivo `.env` seguro** con permisos `600`.
+- **Detección y mitigación automática de CSF Firewall** (activa `DOCKER="1"` en `/etc/csf/csf.conf` y abre puertos en `TCP_IN`).
+- **Nginx Reverse Proxy** con soporte WebSocket, cabeceras seguras, tiempos de espera ampliados para OCR/reportes y compatibilidad con Certbot (Let's Encrypt).
+- **Modo de despliegue a elegir:** Docker Compose v2 o Servicio nativo Systemd.
 
 ---
 
-### 2. Uso con el Script de Inicio (`start.sh`)
-
-El script `start.sh` prepara automáticamente el entorno virtual si no existe:
+## 💻 Ejecución Local y Desarrollo
 
 ```bash
-# Probar conexión con DFIR-IRIS
-./start.sh test
+# Iniciar o reiniciar el servicio en segundo plano (http://localhost:8080)
+./start.sh start
+./start.sh restart
 
-# Iniciar la interfaz Web (puerto 8080)
-./start.sh web
+# Comprobar estado del servicio
+./start.sh status
 
-# Iniciar el daemon de monitoreo de carpetas
-./start.sh watcher
+# Ver bitácoras en tiempo real
+./start.sh logs
 
-# Analizar un ticket en consola
-./start.sh cli parse ruta/ticket.pdf
-
-# Crear caso en DFIR-IRIS desde consola
-./start.sh cli create ruta/ticket.pdf
+# Ejecutar suite de pruebas pytest
+./venv/bin/pytest tests/ -v
 ```
 
 ---
 
-## 💻 Guía de Uso de la CLI (`cli.py`)
+## 📂 Estructura del Proyecto
 
-### 1. Inspeccionar templates locales
-```bash
-python3 cli.py templates
 ```
-
-### 2. Analizar un PDF sin crear el caso (inspección)
-```bash
-python3 cli.py parse /ruta/al/ticket.pdf
-```
-
-Salida esperada:
-```text
-Analizando archivo: ticket_789475.pdf
-
---- Datos Extraídos del Ticket ---
-  • Ticket ID: 789475
-  • URL Ticket: https://helpdesk.neubox.com/#ticket/zoom/789475
-  • Reportante: Hector Hernandez (BrutalRx)
-  • Activo Afectado: nexapharm.com
-  • Servidor(es) Neubox: svgp261.serverneubox.com.mx
-  • IP Primaria: 198.59.144.23
-  • Resumen: Venta de catálogo de esteroides anabólicos y prescripción médica sin receta (COFEPRIS).
-
---- Clasificación de Template Recomendada ---
-  • Template: [FRAUD] ABUSE | Fraude, scam y suplantación (abuse_fraud)
-  • Confianza: 98.0%
-  • Criterios / Motivos: esteroides, anabólicos, medicamentos, cofepris, receta médica
-
---- Indicadores (IOCs) detectados (4) ---
-  [DOMAIN] nexapharm.com
-  [URL] https://nexapharm.com/farmaceuticos
-  [IP] 198.59.144.23
-```
-
-### 3. Simular la creación (Dry-Run)
-Valida la generación del payload y comprueba la estructura sin escribir en la base de datos de IRIS:
-```bash
-python3 cli.py create /ruta/al/ticket.pdf --dry-run
-```
-
-### 4. Crear el caso real en DFIR-IRIS
-```bash
-python3 cli.py create /ruta/al/ticket.pdf
-```
-
-### 5. Forzar un template específico
-Si deseas sobreescribir la clasificación automática:
-```bash
-python3 cli.py create /ruta/al/ticket.pdf --template abuse_takedown
-```
-
-### 6. Procesamiento por lote (Batch)
-Procesa todos los PDFs dentro de un directorio:
-```bash
-python3 cli.py batch /ruta/a/carpeta_tickets/ [--dry-run]
+secops/iris_abuse_sync/
+├── app/
+│   ├── ai/               # Integración oficial Google Gemini SDK (Copiloto SOC)
+│   ├── api/routers/      # Endpoints REST (cases, alerts, admin, auth, ingest, reports)
+│   ├── classification/   # Taxonomía de 4 ejes, catálogos normativos y heurística
+│   ├── core/             # Configuración, bootstrap de base de datos y seguridad Argon2id/Fernet
+│   ├── ingestion/        # Parsers multi-canal (Zammad, WHMCS, IMAP, PDF, OCR)
+│   ├── iris/             # Cliente REST oficial DFIR-IRIS v2.4.29+
+│   ├── models/           # Modelos relacionales SQLAlchemy 2.0
+│   └── reports/          # Compilador de informes técnicos en PDF con evidencias
+├── frontend/             # Single Page Application moderna (React 18, TypeScript, Tailwind CSS, Vite)
+│   └── src/
+│       ├── components/   # Componentes modulares (ActivityStream WYSIWYG, Copilot, IoCs, Drawers)
+│       ├── pages/        # Vistas operativas (Dashboard, Casos, Alertas, Ingesta, Admin, Blacklist)
+│       └── api/          # Cliente API HTTP tipado
+├── deploy/               # Guías para cPanel / AlmaLinux y utilerías de backup
+├── tests/                # Pruebas automatizadas (pytest)
+├── setup_vps.sh          # Asistente de instalación automática para VPS con CSF y Nginx
+├── start.sh              # Control de inicio/parada/reinicio en segundo plano
+└── docker-compose.yml    # Orquestación de contenedores en producción
 ```
 
 ---
 
-## 📂 Modo Watcher (Daemon / VPS)
+## 📄 Licencia
 
-Para automatizar la ingesta continua de archivos:
-
-```bash
-python3 watcher.py --inbox ./inbox
-```
-
-- Cada vez que arrastres o descargues un PDF a `./inbox/`, el daemon:
-  1. Extrae los datos y clasifica el template.
-  2. Crea el caso en DFIR-IRIS con sus notas, IOCs y adjunta el PDF.
-  3. Mueve el PDF a `processed/<timestamp>_<archivo>.pdf`.
-  4. Genera un recibo `processed/<timestamp>_<archivo>.json` con el URL del caso y el ID creado.
-
----
-
-## 🌐 Panel Web UI (FastAPI)
-
-Inicia el servicio web:
-```bash
-python3 web.py
-```
-Abre tu navegador en: **`http://localhost:8080`**
-
-### Funciones del panel:
-- **Drag & Drop**: Arrastra cualquier ticket PDF o TXT.
-- **Botones de muestra**: Carga instantánea de tickets reales (COFEPRIS, PhishFort, Spam de citas, CTIR Gov).
-- **Selector de Template**: Muestra el porcentaje de confianza y permite cambiar el template con un menú desplegable.
-- **Pestañas interactivas**:
-  - `Notas Lite v2.0`: Visualiza las 3 notas que se generarán.
-  - `Indicadores IOCs`: Checkboxes para habilitar/deshabilitar IOCs antes de enviarlos.
-  - `Atributos Personalizados`: Muestra los campos mapeados a `01 Identificación`.
-  - `Texto Raw`: Revisa el texto extraído del ticket.
-- **Acciones**:
-  - `Simular Creación (Dry-Run)`
-  - `Crear Caso en DFIR-IRIS`
-- **Enlace Directo**: Al crear el caso, obtienes un botón directo para abrir el caso en tu instancia de IRIS (`/#/case?cid=...`).
-
----
-
-## 🐳 Despliegue en VPS con Docker
-
-En tu servidor VPS con Docker y Docker Compose instalado:
-
-```bash
-# 1. Clonar o copiar la carpeta iris_abuse_sync
-cd /opt/iris_abuse_sync
-
-# 2. Configurar variables de entorno
-cp .env.example .env
-nano .env
-
-# 3. Iniciar el contenedor en segundo plano
-docker compose up -d
-
-# 4. Ver logs en tiempo real
-docker compose logs -f
-```
-
-El servicio estará disponible en el puerto `8080` de tu VPS.
+Desarrollado para la operación y automatización de respuesta a incidentes de seguridad y abuso en **NEUBOX Internet** y **Hospedando**.

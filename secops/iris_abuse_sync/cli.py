@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 import config
-from parser import TicketParser, extract_text_from_pdf
+from parser import TicketParser, extract_text_from_pdf, extract_text_from_any
 from classifier import TemplateClassifier
 from case_builder import CaseBuilder
 from iris_client import IrisClient
@@ -81,10 +81,7 @@ def cmd_parse(args):
         sys.exit(1)
 
     print(f"\n{Colors.BOLD}Analizando archivo:{Colors.END} {file_path.name}")
-    if file_path.suffix.lower() == ".pdf":
-        raw_text = extract_text_from_pdf(file_path)
-    else:
-        raw_text = file_path.read_text(encoding="utf-8", errors="ignore")
+    raw_text = extract_text_from_any(file_path, file_path.name)
 
     parser = TicketParser(raw_text)
     data = parser.parse()
@@ -125,10 +122,7 @@ def cmd_create(args):
         sys.exit(1)
 
     print(f"\n{Colors.BOLD}Procesando:{Colors.END} {file_path.name}")
-    if file_path.suffix.lower() == ".pdf":
-        raw_text = extract_text_from_pdf(file_path)
-    else:
-        raw_text = file_path.read_text(encoding="utf-8", errors="ignore")
+    raw_text = extract_text_from_any(file_path, file_path.name)
 
     parser = TicketParser(raw_text)
     data = parser.parse()
@@ -209,9 +203,9 @@ def cmd_batch(args):
         print(f"{Colors.RED}Error: El directorio '{dir_path}' no existe.{Colors.END}")
         sys.exit(1)
 
-    pdf_files = list(dir_path.glob("*.pdf")) + list(dir_path.glob("*.txt"))
+    pdf_files = list(dir_path.glob("*.pdf")) + list(dir_path.glob("*.eml")) + list(dir_path.glob("*.txt"))
     if not pdf_files:
-        print(f"{Colors.YELLOW}No se encontraron archivos PDF o TXT en {dir_path}{Colors.END}")
+        print(f"{Colors.YELLOW}No se encontraron archivos PDF, EML o TXT en {dir_path}{Colors.END}")
         return
 
     print(f"\n{Colors.BOLD}Procesando {len(pdf_files)} archivos en lote:{Colors.END}")
@@ -221,10 +215,7 @@ def cmd_batch(args):
     for idx, f in enumerate(pdf_files, 1):
         print(f"\n[{idx}/{len(pdf_files)}] {Colors.BOLD}{f.name}{Colors.END}")
         try:
-            if f.suffix.lower() == ".pdf":
-                raw_text = extract_text_from_pdf(f)
-            else:
-                raw_text = f.read_text(encoding="utf-8", errors="ignore")
+            raw_text = extract_text_from_any(f, f.name)
 
             parser = TicketParser(raw_text)
             data = parser.parse()

@@ -41,8 +41,8 @@ class CaseBuilder:
         # 2. Extract and allow overrides for IDs
         report_ticket = overrides.get("report_ticket") or parsed.get("ticket_id", "")
         client_ticket = overrides.get("client_ticket") or parsed.get("client_ticket", "")
-        client_id = overrides.get("client_id", "")
-        service_id = overrides.get("service_id", "")
+        client_id = overrides.get("client_id") or parsed.get("client_id", "")
+        service_id = overrides.get("service_id") or parsed.get("service_id", "")
         server = overrides.get("server") or parsed.get("primary_server", "")
         asset = overrides.get("affected_asset") or parsed.get("affected_asset", "")
 
@@ -98,17 +98,28 @@ class CaseBuilder:
         if overrides.get("case_description"):
             summary_md = overrides["case_description"]
 
-        # 4. Custom Attributes
-        if overrides.get("custom_attributes"):
-            custom_attributes = overrides["custom_attributes"]
+        # 4. Custom Attributes (always keep 01 Identificación synchronized with the 6 parameters)
+        base_id_attrs = {
+            "Ticket de abuso": report_ticket,
+            "Dominio o activo reportado": asset or parsed.get("primary_domain") or "",
+            "IP reportada": parsed.get("primary_ip", ""),
+            "Ticket del titular": client_ticket,
+            "ID de Cliente": client_id,
+            "ID de Servicio": service_id,
+            "Servidor": server
+        }
+        if overrides.get("custom_attributes") and isinstance(overrides["custom_attributes"], dict):
+            custom_attributes = dict(overrides["custom_attributes"])
+            sec01 = dict(custom_attributes.get("01 Identificación") or {})
+            for k, v in base_id_attrs.items():
+                if v:
+                    sec01[k] = v
+                elif k not in sec01:
+                    sec01[k] = ""
+            custom_attributes["01 Identificación"] = sec01
         else:
             custom_attributes = {
-                "01 Identificación": {
-                    "Ticket de abuso": report_ticket,
-                    "Dominio o activo reportado": parsed.get("primary_domain") or asset,
-                    "IP reportada": parsed.get("primary_ip", ""),
-                    "Ticket del titular": client_ticket
-                }
+                "01 Identificación": base_id_attrs
             }
 
         # 5. Build Notes (SOC Abuse Lite v2.0)
@@ -183,11 +194,20 @@ class CaseBuilder:
             f"- Estado final / pendientes: Caso abierto para seguimiento."
         )
 
+        # Unificada en una sola Ficha Operativa Integrada (SOC Abuse Sync v3.1)
+        consolidated_content = (
+            f"# Ficha Operativa Integrada — {case_name}\n\n"
+            f"## 1. Reporte Inicial y Recepción\n"
+            f"{note1_content}\n\n"
+            f"## 2. Investigación Técnica y Hallazgos\n"
+            f"{note2_content}\n\n"
+            f"## 3. Acciones de Contención y Resolución\n"
+            f"{note3_content}\n"
+        )
+
         # If user passed custom notes, apply them
         notes = overrides.get("notes") or [
-            {"title": "01 Reporte inicial", "content": note1_content},
-            {"title": "02 Investigación y evidencia", "content": note2_content},
-            {"title": "03 Acciones y resolución", "content": note3_content}
+            {"title": "04 Ficha Operativa Integrada", "content": consolidated_content}
         ]
 
         return {

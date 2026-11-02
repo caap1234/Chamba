@@ -8,6 +8,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    libpq-dev \
+    gcc \
+    libcairo2 \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libgdk-pixbuf-2.0-0 \
+    shared-mime-info \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
@@ -15,8 +22,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-RUN mkdir -p inbox processed errors scratch templates
+RUN mkdir -p incoming processed scratch templates \
+    storage/evidences storage/migration_backups storage/reports
 
 EXPOSE 8080
 
-CMD ["uvicorn", "web:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8080 --proxy-headers --forwarded-allow-ips='*'"]

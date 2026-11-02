@@ -18,7 +18,7 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 import config
-from parser import TicketParser, extract_text_from_pdf
+from parser import TicketParser, extract_text_from_pdf, extract_text_from_any
 from classifier import TemplateClassifier
 from case_builder import CaseBuilder
 from iris_client import IrisClient
@@ -52,8 +52,8 @@ class TicketFileHandler(FileSystemEventHandler):
         self.process_file(file_path)
 
     def process_file(self, file_path: Path):
-        # Only process .pdf and .txt
-        if file_path.suffix.lower() not in (".pdf", ".txt"):
+        # Process .pdf, .eml, and .txt
+        if file_path.suffix.lower() not in (".pdf", ".eml", ".txt"):
             return
 
         if file_path.name.startswith("."):
@@ -70,10 +70,7 @@ class TicketFileHandler(FileSystemEventHandler):
             logger.info(f"Nuevo archivo detectado para procesamiento: {file_path.name}")
 
             # Extract text
-            if file_path.suffix.lower() == ".pdf":
-                raw_text = extract_text_from_pdf(file_path)
-            else:
-                raw_text = file_path.read_text(encoding="utf-8", errors="ignore")
+            raw_text = extract_text_from_any(file_path, file_path.name)
 
             # Parse & classify
             parser = TicketParser(raw_text)
