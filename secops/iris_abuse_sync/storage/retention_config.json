@@ -1,0 +1,31 @@
+{
+  "destination": "local",
+  "local_path": "storage/backups",
+  "ftp": {
+    "host": "",
+    "port": 21,
+    "username": "",
+    "password": "",
+    "remote_path": "/backups/soc_iris",
+    "use_tls": false
+  },
+  "sftp": {
+    "host": "",
+    "port": 22,
+    "username": "",
+    "password": "",
+    "remote_path": "/backups/soc_iris"
+  },
+  "gdrive": {
+    "folder_id": "respaldo-513505",
+    "service_account_email": "",
+    "enabled": false
+  },
+  "schedule": {
+    "enabled": true,
+    "time_utc": "03:00",
+    "prune_binaries_after_days": 90,
+    "archive_cases_after_days": 365,
+    "auto_prune_closed_cases": true
+  }
+}

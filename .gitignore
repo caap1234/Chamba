@@ -19,8 +19,6 @@ secops/iris_abuse_sync/storage/evidences/*
 !secops/iris_abuse_sync/storage/evidences/.gitkeep
 secops/iris_abuse_sync/storage/reports/*
 !secops/iris_abuse_sync/storage/reports/.gitkeep
-secops/iris_abuse_sync/storage/retention_config.json
 secops/iris_abuse_sync/frontend/node_modules/
-secops/iris_abuse_sync/frontend/dist/
 *.tar.gz
 

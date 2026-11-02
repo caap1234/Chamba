@@ -454,3 +454,4 @@ echo "  1. Guarda la contraseña inicial en tu gestor de claves seguro."
 echo "  2. Puedes dar de alta analistas adicionales en: Configuración SOC > Usuarios y roles."
 echo "  3. Para consultar bitácoras en vivo ejecuta: ./start.sh logs o docker compose logs -f"
 echo
+

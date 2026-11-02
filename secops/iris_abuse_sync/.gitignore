@@ -18,12 +18,10 @@ storage/evidences/*
 !storage/evidences/.gitkeep
 storage/reports/*
 !storage/reports/.gitkeep
-storage/retention_config.json
 *.tar.gz
 
-# Frontend dependencies and builds
+# Frontend dependencies
 frontend/node_modules/
-frontend/dist/
 frontend/.eslintcache
 
 # Virtual environments
