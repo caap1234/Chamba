@@ -19,12 +19,13 @@ Todos los scripts están desarrollados en Python estándar sin dependencias de t
 | **07** | [`07_suspicious_activity_correlator.py`](#07-suspicious-activity-correlator) | cPanel, DirectAdmin, Linux | Timeline cronológico cruzando IP, Web, Exim, Archivos y SSH en una sola ventana. |
 | **08** | [`08_windows_server_investigator.py`](#08-windows-server-investigator) | Windows Server (y análisis offline en Linux) | Logs IIS W3C, Eventos Windows 4624/4625, RDP, Tareas programadas y SMTP. |
 | **09** | [`09_service_health_check.py`](#09-service-health-check) | cPanel, DirectAdmin, Linux, Windows | Procesos, miners, puertos, conexiones directas al puerto 25, inodos y salud. |
+| **10** | [`10_dns_subdomain_changes_investigator.py`](#10-dns-subdomain-changes-investigator) | cPanel, WHM, DirectAdmin | Cambios en zonas DNS, creación de registros A/CNAME/TXT/MX, subdominios, alias, exclusión IP propia y auditoría de `.lastlogin`. |
 
 ---
 
 ## 🚀 Menú Interactivo Global
 
-Puedes ejecutar el menú principal que te permite seleccionar cualquiera de las 9 herramientas con un menú numérico:
+Puedes ejecutar el menú principal que te permite seleccionar cualquiera de las 10 herramientas con un menú numérico:
 
 ```bash
 python3 run_investigator.py
@@ -180,6 +181,30 @@ python3 09_service_health_check.py --server directadmin
 
 # Detección de procesos de cripto-minería y conexiones salientes al puerto 25
 python3 09_service_health_check.py --check-miners
+```
+
+---
+
+### 10. DNS & Subdomain Changes Investigator
+Audita modificaciones en registros de zonas DNS (ZoneEdit, creación de registros A, CNAME, TXT, MX, edición masiva `mass_edit_zone`), creación de subdominios y dominios adicionales en logs actuales y archivados (`archive/access_log-*.gz`).
+Extrae la IP real del actor vía `X-Forwarded-For` y omite automáticamente la IP del analista (`72.249.55.*`).
+Si la modificación se realizó en fechas sin registros de logs (por rotación o expiración de retención), inspecciona `/home/usuario/.lastlogin` y el archivo de zona física `/var/named/<dominio>.db` para identificar quién accedió a la cuenta en esa fecha.
+
+```bash
+# Modo general interactivo
+python3 10_dns_subdomain_changes_investigator.py
+
+# Investigar un dominio objetivo en los últimos 30 días
+python3 10_dns_subdomain_changes_investigator.py --domain misitio.com
+
+# Investigar un usuario cPanel en una fecha específica
+python3 10_dns_subdomain_changes_investigator.py --user wikumxco --date 2026-10-15
+
+# Buscar un subdominio o registro sospechoso (ej. telsurpagos)
+python3 10_dns_subdomain_changes_investigator.py --search telsurpagos
+
+# Forzar consulta a .lastlogin y omitir IPs personalizadas
+python3 10_dns_subdomain_changes_investigator.py --user cliente1 --check-lastlogin --exclude-ip 72.249.55.
 ```
 
 ---

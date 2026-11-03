@@ -13,6 +13,7 @@ Lanzador interactivo para la suite completa de herramientas de investigación:
 07. Suspicious Activity Correlator
 08. Windows Server Investigator
 09. Service Health & Exposure Check
+10. DNS & Subdomain Changes Investigator
 
 Uso directo en cualquier servidor (sin necesidad de clonar el repo):
   python3 <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/run_investigator.py)
@@ -39,6 +40,7 @@ TOOLS = [
     ("07", "Suspicious Activity Correlator", "07_suspicious_activity_correlator.py", "Timeline cronológico cruzando IP, Web, Exim, Archivos y SSH"),
     ("08", "Windows Server Investigator", "08_windows_server_investigator.py", "IIS W3C logs, Eventos Windows 4624/4625, RDP, Tareas"),
     ("09", "Service Health & Exposure Check", "09_service_health_check.py", "Procesos, Miners, Puertos, Conexiones SMTP, Inodos y Servicios"),
+    ("10", "DNS & Subdomain Changes", "10_dns_subdomain_changes_investigator.py", "Cambios en zonas DNS, Subdominios, Alias, X-Forwarded-For y .lastlogin"),
 ]
 
 
@@ -103,7 +105,7 @@ def main():
 
     while True:
         print_banner()
-        choice = input("\nIngresa el número de módulo [01-09, 00 para salir]: ").strip()
+        choice = input("\nIngresa el número de módulo [01-10, 00 para salir]: ").strip()
         if choice in ('00', '0', 'exit', 'quit', 'q'):
             print("\nSaliendo del toolkit. ¡Buen turno!")
             break
