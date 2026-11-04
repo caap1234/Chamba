@@ -174,11 +174,28 @@ def get_log_files(include_archive=True, since_dt=None):
                 if os.path.getmtime(p) >= cutoff:
                     filtered.append(p)
                 else:
-                    # Si el archivo está en archive y tiene el nombre access_log-MM-YYYY, no descartarlo a ciegas
-                    m_arch = re.search(r'access_log-(\d{1,2})-(\d{4})', p)
-                    if m_arch:
-                        m_mon, m_yr = int(m_arch.group(1)), int(m_arch.group(2))
-                        if (m_yr > since_dt.year) or (m_yr == since_dt.year and m_mon >= since_dt.month):
+                    # Si el archivo está en archive, verificar si el nombre sugiere fecha reciente
+                    fname = os.path.basename(p)
+                    # 1. YYYY-MM-DD o YYYY-MM
+                    m_ym = re.search(r'access_log-(\d{4})-(\d{1,2})(?:-(\d{1,2}))?', fname)
+                    if m_ym:
+                        yr, mo = int(m_ym.group(1)), int(m_ym.group(2))
+                        if (yr > since_dt.year) or (yr == since_dt.year and mo >= since_dt.month):
+                            filtered.append(p)
+                            continue
+                    # 2. MM-DD-YYYY o MM-YYYY
+                    m_mdy = re.search(r'access_log-(\d{1,2})(?:-(\d{1,2}))?-(\d{4})', fname)
+                    if m_mdy:
+                        mo, yr = int(m_mdy.group(1)), int(m_mdy.group(3))
+                        if (yr > since_dt.year) or (yr == since_dt.year and mo >= since_dt.month):
+                            filtered.append(p)
+                            continue
+                    # 3. Mon-YYYY (ej. Nov-2026)
+                    m_txt = re.search(r'access_log-([A-Za-z]{3})-(\d{4})', fname)
+                    if m_txt:
+                        mon_str, yr_str = m_txt.groups()
+                        mo = MONTHS.get(mon_str.capitalize(), 0)
+                        if mo > 0 and ((int(yr_str) > since_dt.year) or (int(yr_str) == since_dt.year and mo >= since_dt.month)):
                             filtered.append(p)
                             continue
             except OSError:
@@ -239,6 +256,49 @@ def extract_parameters(uri):
     return params
 
 
+def domain_matches_target(target, line_lower, dom, rec_name, fqdn):
+    """
+    Comprueba si un evento coincide con el target_domain especificado.
+    Soporta:
+    - Dominio exacto o en línea (ej. acap.com.mx en line)
+    - Subdominios (ej. target: 'telsurpagos.acap.com.mx', con dom='acap.com.mx', rec_name='telsurpagos')
+    - Registro / prefijo solo (ej. target: 'telsurpagos', rec_name='telsurpagos')
+    """
+    if not target:
+        return True
+
+    target = target.lower().strip().rstrip('.')
+    dom = (dom or '').lower().strip().rstrip('.')
+    rec_name = (rec_name or '').lower().strip().rstrip('.')
+    fqdn = (fqdn or '').lower().strip().rstrip('.')
+
+    # 1. Coincidencia directa textual en la línea
+    if target in line_lower:
+        return True
+
+    # 2. Coincidencia exacta con FQDN, dominio base o nombre de registro
+    if target in (fqdn, dom, rec_name):
+        return True
+
+    # 3. Si target es un FQDN (ej. telsurpagos.acap.com.mx)
+    if '.' in target:
+        if fqdn and (fqdn == target or fqdn.endswith('.' + target) or target.endswith('.' + fqdn)):
+            return True
+        if dom and rec_name:
+            reconstructed = ('%s.%s' % (rec_name, dom)).rstrip('.')
+            if reconstructed == target or target == reconstructed:
+                return True
+        if dom and target.endswith('.' + dom):
+            prefix = target[:-len(dom)-1]
+            if prefix and (prefix == rec_name or prefix in line_lower):
+                return True
+    else:
+        if target == rec_name or (dom and target == dom):
+            return True
+
+    return False
+
+
 def lookup_domain_owner(domain):
     """Busca el usuario de cPanel dueño de un dominio en /etc/userdomains."""
     if not domain:
@@ -248,19 +308,30 @@ def lookup_domain_owner(domain):
     if os.path.isfile(userdomains_path):
         try:
             with open(userdomains_path, 'r', encoding='utf-8', errors='replace') as fh:
+                mapping = {}
                 for line in fh:
                     line = line.strip()
                     if line.startswith('#') or ':' not in line:
                         continue
                     d, u = line.split(':', 1)
-                    if d.strip().lower() == domain:
-                        return u.strip()
+                    mapping[d.strip().lower()] = u.strip()
+
+                # 1. Búsqueda directa exacta
+                if domain in mapping:
+                    return mapping[domain]
+
+                # 2. Si es subdominio (ej. telsurpagos.acap.com.mx), buscar zona padre
+                parts = domain.split('.')
+                for i in range(1, len(parts) - 1):
+                    parent = '.'.join(parts[i:])
+                    if parent in mapping:
+                        return mapping[parent]
         except OSError:
             pass
     return None
 
 
-def inspect_physical_zone_file(domain):
+def inspect_physical_zone_file(domain, target_search=None):
     """
     Inspecciona el archivo de zona física en /var/named/<domain>.db para
     obtener fecha de modificación en disco, serial SOA y registros clave.
@@ -269,14 +340,18 @@ def inspect_physical_zone_file(domain):
     if not domain:
         return info
 
-    cand_paths = [
-        '/var/named/%s.db' % domain,
-        '/var/named/chroot/var/named/%s.db' % domain
-    ]
+    cand_domains = [domain]
+    parts = domain.split('.')
+    for i in range(1, len(parts) - 1):
+        cand_domains.append('.'.join(parts[i:]))
+
     found_path = None
-    for p in cand_paths:
-        if os.path.isfile(p):
-            found_path = p
+    for d in cand_domains:
+        for p in ['/var/named/%s.db' % d, '/var/named/chroot/var/named/%s.db' % d]:
+            if os.path.isfile(p):
+                found_path = p
+                break
+        if found_path:
             break
 
     if not found_path:
@@ -304,6 +379,21 @@ def inspect_physical_zone_file(domain):
                     info['serial_date'] = "%04d-%02d-%02d (Rev %s)" % (s_yr, s_mo, s_dy, serial_str[8:])
                 except Exception:
                     pass
+
+        # Buscar si el subdominio o término existe en el archivo de zona física
+        search_terms = []
+        if len(parts) > 2:
+            search_terms.append(parts[0])
+        if target_search:
+            search_terms.append(target_search)
+
+        if search_terms:
+            for zline in content.splitlines():
+                zline_s = zline.strip()
+                if not zline_s or zline_s.startswith(';') or zline_s.startswith('$'):
+                    continue
+                if any(re.search(r'\b' + re.escape(sterm) + r'\b', zline_s, re.I) for sterm in search_terms):
+                    info['records'].append(zline_s)
     except Exception:
         pass
 
@@ -530,9 +620,22 @@ def main():
                     if target_user and target_user not in line.lower():
                         continue
 
-                    # Filtro de dominio si se especificó
-                    if target_domain and target_domain not in line.lower():
-                        continue
+                    # Pre-filtro rápido de dominio / subdominio
+                    if target_domain:
+                        if target_domain not in line.lower():
+                            dom_parts = target_domain.split('.')
+                            sub_prefix = dom_parts[0]
+                            has_part = False
+                            if sub_prefix and len(sub_prefix) >= 3 and sub_prefix in line.lower():
+                                has_part = True
+                            else:
+                                for i in range(1, len(dom_parts) - 1):
+                                    parent_candidate = '.'.join(dom_parts[i:])
+                                    if parent_candidate in line.lower():
+                                        has_part = True
+                                        break
+                            if not has_part:
+                                continue
 
                     # Filtro de IP objetivo si se especificó
                     if target_ip and target_ip not in line:
@@ -598,10 +701,22 @@ def main():
                         rec_type = params.get('type') or ''
                         rec_dest = params.get('address') or params.get('cname') or params.get('txtdata') or ''
 
+                        # Armar FQDN
+                        fqdn = ""
+                        if rec_name and dom:
+                            fqdn = ("%s.%s" % (rec_name, dom)).rstrip('.') if not rec_name.endswith(dom) else rec_name
+                        elif dom:
+                            fqdn = dom
+                        elif rec_name:
+                            fqdn = rec_name
+
+                        # Filtro exacto de dominio / subdominio
+                        if target_domain and not domain_matches_target(target_domain, line.lower(), dom, rec_name, fqdn):
+                            continue
+
                         # Armar resumen de acción
                         summary_detail = ""
                         if rec_name and dom:
-                            fqdn = "%s.%s" % (rec_name, dom) if not rec_name.endswith(dom) else rec_name
                             summary_detail = "%s (%s) -> %s" % (fqdn, rec_type or 'A', rec_dest or '?')
                         elif dom:
                             summary_detail = "Zona: %s" % dom
@@ -650,7 +765,7 @@ def main():
 
     physical_zones = {}
     for dom in domains_to_check:
-        p_info = inspect_physical_zone_file(dom)
+        p_info = inspect_physical_zone_file(dom, target_search=search_term)
         if p_info['file_exists']:
             physical_zones[dom] = p_info
 
@@ -707,10 +822,14 @@ def main():
         out.append("ESTADO FÍSICO DE ZONAS DNS EN DISCO (/var/named/<dominio>.db)")
         out.append("=" * 80)
         for dom, p_info in physical_zones.items():
-            out.append("  Dominio:              %s" % dom)
+            out.append("  Dominio / Zona:       %s" % dom)
             out.append("  Archivo en disco:     %s" % p_info['path'])
             out.append("  Última modificación:  %s" % (p_info['mtime'].strftime('%Y-%m-%d %H:%M:%S') if p_info['mtime'] else 'N/A'))
             out.append("  Serial SOA:           %s (%s)" % (p_info.get('serial') or 'N/A', p_info.get('serial_date') or 'N/A'))
+            if p_info.get('records'):
+                out.append("  Registros coincidentes en archivo de zona:")
+                for r in p_info['records'][:10]:
+                    out.append("    -> %s" % r)
             out.append("-" * 80)
 
     # Tabla cronológica de eventos encontrados en logs
@@ -810,3 +929,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
