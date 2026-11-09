@@ -3,13 +3,22 @@ set -uo pipefail
 export LC_ALL=C
 
 if (( EUID != 0 )); then echo 'ERROR: Ejecutar como root.' >&2; exit 2; fi
-if [[ ! -d /usr/local/cpanel ]] || ! command -v dnf >/dev/null 2>&1; then
-  echo 'ERROR: Este script requiere cPanel/WHM sobre un sistema con dnf.' >&2; exit 2
+
+PKG_MGR=""
+if command -v dnf >/dev/null 2>&1; then
+  PKG_MGR="dnf"
+elif command -v yum >/dev/null 2>&1; then
+  PKG_MGR="yum"
+fi
+
+if [[ ! -d /usr/local/cpanel || -z "$PKG_MGR" ]]; then
+  echo 'ERROR: Este script requiere cPanel/WHM sobre un sistema con dnf o yum.' >&2; exit 2
 fi
 
 LOG="/root/php_security_cpanel_$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee -a "$LOG") 2>&1
 printf 'Inicio: %s | Log: %s\n' "$(date -Is 2>/dev/null || date '+%Y-%m-%d %H:%M:%S')" "$LOG"
+echo "Gestor de paquetes detectado: $PKG_MGR"
 
 declare -A MIN=( [82]=8.2.35 [83]=8.3.36 [84]=8.4.27 [85]=8.5.12 )
 declare -A BACKPORT_DESC=(
@@ -28,10 +37,10 @@ version_of() {
 
 meets() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" == "$2" ]]; }
 
-has_dnf_update() {
+has_pkg_update() {
   local b="$1"
   local code=0
-  dnf check-update -q "ea-php${b}*" >/dev/null 2>&1 || code=$?
+  $PKG_MGR check-update -q "ea-php${b}*" >/dev/null 2>&1 || code=$?
   if (( code == 100 )); then
     return 0 # Hay actualización pendiente en los repositorios
   fi
@@ -42,8 +51,8 @@ is_cpanel_backported() {
   local b="$1"
   local pkg="ea-php${b}-php-cli"
 
-  # Si dnf reporta actualización pendiente para este ea-php, no está al día
-  if has_dnf_update "$b"; then
+  # Si el gestor de paquetes reporta actualización pendiente para este ea-php, no está al día
+  if has_pkg_update "$b"; then
     return 1
   fi
 
@@ -101,9 +110,23 @@ legacy=$(rpm -qa --qf '%{NAME}\n' | grep -E '^ea-php(5[0-9]|7[0-3])-php-cli$' ||
 if (( ${#needs[@]} )); then
   patterns=()
   for b in "${needs[@]}"; do patterns+=("ea-php${b}*"); done
-  echo "===== ACTUALIZANDO MEDIANTE DNF: ${needs[*]} ====="
-  if ! dnf upgrade -y --refresh "${patterns[@]}"; then
-    echo 'ERROR: dnf reportó un fallo en la actualización.'
+  echo "===== ACTUALIZANDO MEDIANTE $PKG_MGR: ${needs[*]} ====="
+
+  update_ok=0
+  if [[ "$PKG_MGR" == "dnf" ]]; then
+    if dnf upgrade -y --refresh "${patterns[@]}"; then
+      update_ok=1
+    fi
+  else
+    # yum en CentOS 7 / CloudLinux 7
+    yum clean expire-cache >/dev/null 2>&1 || true
+    if yum update -y "${patterns[@]}"; then
+      update_ok=1
+    fi
+  fi
+
+  if (( update_ok == 0 )); then
+    echo "ERROR: $PKG_MGR reportó un fallo en la actualización."
     failed=1
   else
     if [[ -x /scripts/restartsrv_apache_php_fpm ]]; then
