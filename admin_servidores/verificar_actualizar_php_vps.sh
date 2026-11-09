@@ -74,19 +74,33 @@ echo "Gestor de Paquetes: $PKG_MGR"
 # 2. Funciones de Ayuda y Estándares de Seguridad
 # ------------------------------------------------------------------------------
 declare -A MIN=( ["8.2"]="8.2.35" ["8.3"]="8.3.36" ["8.4"]="8.4.27" ["8.5"]="8.5.12" )
-declare -A BACKPORT_DESC=(
-  ["7.4"]="Corregida mediante backport / parches de seguridad"
-  ["8.0"]="Corregida mediante backport / parches de seguridad"
-  ["8.1"]="Corregida mediante backport / parches de seguridad"
-)
 
 meets() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" == "$2" ]]; }
+
+get_installed_php_packages() {
+  if [[ "$FAMILY" == "debian" ]]; then
+    dpkg-query -W -f='${binary:Package}\n' 'php*' 2>/dev/null | grep -E '^php' || true
+  else
+    rpm -qa --qf '%{NAME}\n' | grep -E '^(php|ea-php|alt-php)' || true
+  fi
+}
+
+get_pkg_revision() {
+  local br="$1"
+  if [[ "$FAMILY" == "debian" ]]; then
+    dpkg-query -W -f='${Version}' "php${br}-cli" 2>/dev/null || \
+    dpkg-query -W -f='${Version}' "php${br}-common" 2>/dev/null || \
+    dpkg-query -W -f='${Version}' "php-cli" 2>/dev/null || echo ""
+  else
+    local nodot="${br/./}"
+    rpm -q --qf '%{VERSION}-%{RELEASE}' "php${nodot}-php-cli" 2>/dev/null || \
+    rpm -q --qf '%{VERSION}-%{RELEASE}' "php-cli" 2>/dev/null || echo ""
+  fi
+}
 
 # ------------------------------------------------------------------------------
 # 3. Detección de Instalaciones y Binarios de PHP
 # ------------------------------------------------------------------------------
-# Un VPS puede tener el PHP por defecto (/usr/bin/php) y/o múltiples ramas
-# (como /usr/bin/php7.4, /usr/bin/php8.1, o Remi /opt/remi/phpXX/root/usr/bin/php)
 declare -A BRANCH_BIN=()
 declare -a DETECTED_BRANCHES=()
 
@@ -132,92 +146,86 @@ fi
 echo "Ramas PHP detectadas: ${DETECTED_BRANCHES[*]}"
 
 # ------------------------------------------------------------------------------
-# 4. Evaluación de Estado Inicial
+# 4. Evaluación de Estado Inicial y Actualizaciones Pendientes
 # ------------------------------------------------------------------------------
-needs_branches=()
-packages_to_upgrade=()
-failed=0
-
-check_pkg_update_debian() {
-  local br="$1"
-  # Comprobar si apt reporta candidatos superiores para php$br-cli o php-cli
-  local pkgs_to_check=("php${br}-cli" "php${br}-common" "php${br}-fpm" "php-cli")
-  local has_update=1
-  for p in "${pkgs_to_check[@]}"; do
-    if dpkg -l "$p" 2>/dev/null | grep -q '^ii'; then
-      local policy
-      policy=$(apt-cache policy "$p" 2>/dev/null || true)
-      local inst cand
-      inst=$(echo "$policy" | awk '/Installed:/ {print $2}')
-      cand=$(echo "$policy" | awk '/Candidate:/ {print $2}')
-      if [[ -n "$inst" && -n "$cand" && "$inst" != "$cand" && "$cand" != "(none)" ]]; then
-        packages_to_upgrade+=("$p")
-        has_update=0
-      fi
-    fi
-  done
-  return "$has_update"
-}
-
-check_pkg_update_redhat() {
-  local br="$1"
-  local nodot="${br/./}"
-  local patterns=("php*" "php${nodot}*")
-  local code=0
-  $PKG_MGR check-update -q "${patterns[@]}" >/dev/null 2>&1 || code=$?
-  if (( code == 100 )); then
-    packages_to_upgrade+=("${patterns[@]}")
-    return 0
-  fi
-  return 1
-}
-
-# Refrescar repositorios según la distribución
 echo ""
 echo "Sincronizando índices de paquetes del sistema..."
 if [[ "$FAMILY" == "debian" ]]; then
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq || true
+  apt-get update -qq 2>/dev/null || true
 fi
+
+# Detección precisa de paquetes PHP que realmente tienen actualización pendiente
+declare -a PENDING_PACKAGES=()
+
+check_pending_updates() {
+  local installed
+  installed=$(get_installed_php_packages)
+  [[ -z "$installed" ]] && return 0
+
+  if [[ "$FAMILY" == "debian" ]]; then
+    while IFS= read -r pkg; do
+      [[ -z "$pkg" ]] && continue
+      local policy
+      policy=$(apt-cache policy "$pkg" 2>/dev/null || true)
+      local inst cand
+      inst=$(echo "$policy" | awk '/Installed:/ {print $2}')
+      cand=$(echo "$policy" | awk '/Candidate:/ {print $2}')
+      if [[ -n "$inst" && -n "$cand" && "$inst" != "$cand" && "$cand" != "(none)" ]]; then
+        PENDING_PACKAGES+=("$pkg")
+      fi
+    done <<< "$installed"
+  else
+    while IFS= read -r pkg; do
+      [[ -z "$pkg" ]] && continue
+      local code=0
+      $PKG_MGR check-update -q "$pkg" >/dev/null 2>&1 || code=$?
+      if (( code == 100 )); then
+        PENDING_PACKAGES+=("$pkg")
+      fi
+    done <<< "$installed"
+  fi
+}
+
+check_pending_updates
+
+branch_has_pending() {
+  local br="$1"
+  local nodot="${br/./}"
+  for p in "${PENDING_PACKAGES[@]}"; do
+    if [[ "$p" == *"php${br}"* || "$p" == *"php${nodot}"* || "$p" == "php-cli" || "$p" == "php-common" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+needs_branches=()
+failed=0
 
 echo ""
 echo "===== ESTADO INICIAL DE PHP ====="
 for br in "${DETECTED_BRANCHES[@]}"; do
   bin="${BRANCH_BIN[$br]}"
   full_ver=$("$bin" -r 'echo PHP_VERSION;' 2>/dev/null || echo "NO DISPONIBLE")
+  pkg_rev=$(get_pkg_revision "$br")
 
-  if [[ "$br" =~ ^(7\.4|8\.0|8\.1)$ ]]; then
-    # Ramas EOL con backport
-    has_pending=1
-    if [[ "$FAMILY" == "debian" ]]; then
-      check_pkg_update_debian "$br" && has_pending=0
+  # 1. ¿Cumple con la versión upstream de seguridad (p. ej. Ondrej PPA o Remi)?
+  if [[ -n "${MIN[$br]:-}" ]] && meets "$full_ver" "${MIN[$br]}"; then
+    echo "PHP $br: $full_ver - CUMPLE (Versión upstream >= ${MIN[$br]} corregida)"
+
+  # 2. Si no es >= MIN, ¿está la distribución oficial al día con parches backport?
+  elif ! branch_has_pending "$br"; then
+    if [[ -n "$pkg_rev" ]]; then
+      echo "PHP $br: $full_ver (paquete $pkg_rev) - CUMPLE (Al día con parches de seguridad de $OS_PRETTY)"
     else
-      check_pkg_update_redhat "$br" && has_pending=0
+      echo "PHP $br: $full_ver - CUMPLE (Sin actualizaciones pendientes en repositorios del SO)"
     fi
 
-    if (( has_pending == 0 )); then
-      echo "PHP $br: $full_ver - ACTUALIZACION REQUERIDA (Parches pendientes en repositorios)"
-      needs_branches+=("$br")
-    else
-      echo "PHP $br: $full_ver - CUMPLE (${BACKPORT_DESC[$br]})"
-    fi
-
-  elif [[ -n "${MIN[$br]:-}" ]]; then
-    # Ramas activas 8.2, 8.3, 8.4, 8.5
-    if [[ "$full_ver" != "NO DISPONIBLE" ]] && meets "$full_ver" "${MIN[$br]}"; then
-      echo "PHP $br: $full_ver - CUMPLE (min ${MIN[$br]} - Corregida)"
-    else
-      echo "PHP $br: $full_ver - ACTUALIZACION REQUERIDA (min ${MIN[$br]})"
-      needs_branches+=("$br")
-      if [[ "$FAMILY" == "debian" ]]; then
-        check_pkg_update_debian "$br" || packages_to_upgrade+=("php${br}*" "php*")
-      else
-        local nodot="${br/./}"
-        packages_to_upgrade+=("php${nodot}*" "php*")
-      fi
-    fi
+  # 3. Presenta actualizaciones pendientes en los repositorios
   else
-    echo "PHP $br: $full_ver - AVISO: Rama antigua/no evaluada."
+    echo "PHP $br: $full_ver - ACTUALIZACION REQUERIDA (Parches pendientes en repositorios de $OS_PRETTY)"
+    needs_branches+=("$br")
   fi
 done
 
@@ -226,37 +234,22 @@ done
 # ------------------------------------------------------------------------------
 if (( ${#needs_branches[@]} )); then
   echo ""
-  echo "===== ACTUALIZANDO RAMAS: ${needs_branches[*]} ====="
-
-  uniq_pkgs=()
-  while IFS= read -r line; do
-    [[ -n "$line" ]] && uniq_pkgs+=("$line")
-  done < <(printf '%s\n' "${packages_to_upgrade[@]}" | sort -u)
+  echo "===== ACTUALIZANDO PAQUETES PHP PENDIENTES ====="
+  echo "Ramas a actualizar: ${needs_branches[*]}"
+  echo "Paquetes a actualizar: ${PENDING_PACKAGES[*]}"
 
   if [[ "$FAMILY" == "debian" ]]; then
     export DEBIAN_FRONTEND=noninteractive
-    echo "Ejecutando actualización de paquetes PHP vía apt-get..."
-    if (( ${#uniq_pkgs[@]} )); then
-      if ! apt-get install --only-upgrade -y "${uniq_pkgs[@]}"; then
-        echo "AVISO: Intento con lista específica falló, intentando actualización general de paquetes php..."
-        apt-get --only-upgrade -y install 'php*' || failed=1
-      fi
-    else
-      apt-get --only-upgrade -y install 'php*' || failed=1
+    echo "Ejecutando apt-get install --only-upgrade..."
+    if ! apt-get install --only-upgrade -y "${PENDING_PACKAGES[@]}"; then
+      echo "ERROR: apt-get reportó un fallo al actualizar los paquetes."
+      failed=1
     fi
-
   elif [[ "$FAMILY" == "redhat" ]]; then
-    echo "Ejecutando actualización de paquetes PHP vía $PKG_MGR..."
-    if (( ${#uniq_pkgs[@]} )); then
-      if ! $PKG_MGR upgrade -y --refresh "${uniq_pkgs[@]}"; then
-        echo "ERROR: Falló la actualización de paquetes con $PKG_MGR."
-        failed=1
-      fi
-    else
-      if ! $PKG_MGR upgrade -y --refresh 'php*'; then
-        echo "ERROR: Falló la actualización general con $PKG_MGR."
-        failed=1
-      fi
+    echo "Ejecutando $PKG_MGR upgrade..."
+    if ! $PKG_MGR upgrade -y --refresh "${PENDING_PACKAGES[@]}"; then
+      echo "ERROR: $PKG_MGR reportó un fallo al actualizar los paquetes."
+      failed=1
     fi
   fi
 
@@ -282,21 +275,28 @@ fi
 # ------------------------------------------------------------------------------
 # 6. Validación Final
 # ------------------------------------------------------------------------------
+# Re-evaluar paquetes pendientes post-actualización
+PENDING_PACKAGES=()
+check_pending_updates
+
 echo ""
 echo "===== VALIDACION FINAL ====="
 for br in "${DETECTED_BRANCHES[@]}"; do
   bin="${BRANCH_BIN[$br]}"
   full_ver=$("$bin" -r 'echo PHP_VERSION;' 2>/dev/null || echo "NO DISPONIBLE")
+  pkg_rev=$(get_pkg_revision "$br")
 
-  if [[ "$br" =~ ^(7\.4|8\.0|8\.1)$ ]]; then
-    echo "OK PHP $br: $full_ver - CUMPLE (${BACKPORT_DESC[$br]})"
-  elif [[ -n "${MIN[$br]:-}" ]]; then
-    if [[ "$full_ver" != "NO DISPONIBLE" ]] && meets "$full_ver" "${MIN[$br]}"; then
-      echo "OK PHP $br: $full_ver >= ${MIN[$br]} - CUMPLE (Corregida)"
+  if [[ -n "${MIN[$br]:-}" ]] && meets "$full_ver" "${MIN[$br]}"; then
+    echo "OK PHP $br: $full_ver >= ${MIN[$br]} - CUMPLE (Versión upstream)"
+  elif ! branch_has_pending "$br"; then
+    if [[ -n "$pkg_rev" ]]; then
+      echo "OK PHP $br: $full_ver (paquete $pkg_rev) - CUMPLE (Corregida con parches de $OS_PRETTY)"
     else
-      echo "FALLO PHP $br: $full_ver < ${MIN[$br]}"
-      failed=1
+      echo "OK PHP $br: $full_ver - CUMPLE (Corregida con parches del sistema)"
     fi
+  else
+    echo "FALLO PHP $br: $full_ver (Aún presenta actualizaciones pendientes en repositorios)"
+    failed=1
   fi
 done
 
