@@ -79,9 +79,10 @@ meets() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" == "$2" ]]; }
 
 get_installed_php_packages() {
   if [[ "$FAMILY" == "debian" ]]; then
-    dpkg-query -W -f='${binary:Package}\n' 'php*' 2>/dev/null | grep -E '^php' || true
+    # Filtrar exclusivamente paquetes con estado 'ii' (instalados) y quitar sufijo multiarch (:amd64)
+    dpkg -l 'php*' 2>/dev/null | awk '/^ii/ {print $2}' | cut -d: -f1 | sort -u
   else
-    rpm -qa --qf '%{NAME}\n' | grep -E '^(php|ea-php|alt-php)' || true
+    rpm -qa --qf '%{NAME}\n' | grep -E '^(php|ea-php|alt-php)' | sort -u || true
   fi
 }
 
@@ -155,10 +156,10 @@ if [[ "$FAMILY" == "debian" ]]; then
   apt-get update -qq 2>/dev/null || true
 fi
 
-# Detección precisa de paquetes PHP que realmente tienen actualización pendiente
 declare -a PENDING_PACKAGES=()
 
 check_pending_updates() {
+  PENDING_PACKAGES=()
   local installed
   installed=$(get_installed_php_packages)
   [[ -z "$installed" ]] && return 0
@@ -171,7 +172,8 @@ check_pending_updates() {
       local inst cand
       inst=$(echo "$policy" | awk '/Installed:/ {print $2}')
       cand=$(echo "$policy" | awk '/Candidate:/ {print $2}')
-      if [[ -n "$inst" && -n "$cand" && "$inst" != "$cand" && "$cand" != "(none)" ]]; then
+      # Solo es pendiente si el paquete ESTÁ INSTALADO (inst != (none)) y existe candidato superior
+      if [[ -n "$inst" && "$inst" != "(none)" && -n "$cand" && "$cand" != "(none)" && "$inst" != "$cand" ]]; then
         PENDING_PACKAGES+=("$pkg")
       fi
     done <<< "$installed"
@@ -276,7 +278,6 @@ fi
 # 6. Validación Final
 # ------------------------------------------------------------------------------
 # Re-evaluar paquetes pendientes post-actualización
-PENDING_PACKAGES=()
 check_pending_updates
 
 echo ""
