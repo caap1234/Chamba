@@ -1,5 +1,6 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
+from __future__ import print_function, absolute_import, division
 """
 Suite de Investigadores Forenses y de Abuso — Hub Central
 Lanzador interactivo para la suite completa de herramientas de investigación:
@@ -16,15 +17,24 @@ Lanzador interactivo para la suite completa de herramientas de investigación:
 10. DNS & Subdomain Changes Investigator
 
 Uso directo en cualquier servidor (sin necesidad de clonar el repo):
-  python3 <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/run_investigator.py)
-  python3 <(curl -sL https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/run_investigator.py)
+  python <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/run_investigator.py)
+  python <(curl -sL https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/run_investigator.py)
 """
 
 import os
 import subprocess
 import sys
 import tempfile
-import urllib.request
+
+try:
+    import urllib.request as urllib_request
+except ImportError:
+    import urllib2 as urllib_request
+
+try:
+    input = raw_input
+except NameError:
+    pass
 
 RAW_GITHUB_BASE = "https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/"
 
@@ -65,9 +75,12 @@ def ensure_script_available(script_name):
     url = RAW_GITHUB_BASE + script_name
     print("[*] Descargando módulo '%s' desde GitHub..." % script_name)
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Neubox-Investigator-Runner/1.0'})
-        with urllib.request.urlopen(req, timeout=12) as resp:
+        req = urllib_request.Request(url, headers={'User-Agent': 'Neubox-Investigator-Runner/1.0'})
+        resp = urllib_request.urlopen(req, timeout=12)
+        try:
             content = resp.read()
+        finally:
+            resp.close()
         with open(tmp_path, 'wb') as fh:
             fh.write(content)
         os.chmod(tmp_path, 0o755)
@@ -78,7 +91,10 @@ def ensure_script_available(script_name):
         # Intento fallback con wget o curl
         try:
             cmd = ['wget', '-qO', tmp_path, url]
-            subprocess.run(cmd, timeout=10)
+            if hasattr(subprocess, 'run'):
+                subprocess.run(cmd, timeout=10)
+            else:
+                subprocess.call(cmd)
             if os.path.isfile(tmp_path) and os.path.getsize(tmp_path) > 0:
                 os.chmod(tmp_path, 0o755)
                 return tmp_path
@@ -156,7 +172,10 @@ def main():
 
         print("\n[+] Comando a ejecutar: %s\n" % " ".join(cmd))
         try:
-            subprocess.run(cmd)
+            if hasattr(subprocess, 'run'):
+                subprocess.run(cmd)
+            else:
+                subprocess.call(cmd)
         except KeyboardInterrupt:
             print("\n[!] Ejecución interrumpida por el usuario.")
         except Exception as e:

@@ -1,13 +1,14 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
+from __future__ import print_function, absolute_import, division
 """
 01. Abuse Mail Investigator
 Plataformas: cPanel & DirectAdmin
 Uso:
-  python3 01_abuse_mail_investigator.py
-  python3 01_abuse_mail_investigator.py --server cpanel --email usuario@dominio.com --days 3
-  python3 01_abuse_mail_investigator.py --server directadmin --domain dominio.com --days 7
-  python3 01_abuse_mail_investigator.py --days 1 --top 25
+  python 01_abuse_mail_investigator.py
+  python 01_abuse_mail_investigator.py --server cpanel --email usuario@dominio.com --days 3
+  python 01_abuse_mail_investigator.py --server directadmin --domain dominio.com --days 7
+  python 01_abuse_mail_investigator.py --days 1 --top 25
 
 Investigación de spam, autenticaciones SMTP/Dovecot, remitentes, destinatarios,
 volumen de envíos, scripts PHP (cwd) y correlación de envíos Webmail (127.0.0.1)
@@ -24,7 +25,13 @@ import io
 import os
 import re
 import sys
+import time
 from email.header import decode_header, make_header
+
+try:
+    input = raw_input
+except NameError:
+    pass
 
 # Expresiones regulares de Exim y logs del sistema
 EXIM_LINE = re.compile(
@@ -44,6 +51,27 @@ LOCAL_PROTOCOLS = {'local', 'local-bsmtp', 'local-esmtp'}
 FILTER_USERS = {'mail', 'exim', 'mailnull', 'debian-exim', 'dovecot'}
 IGNORE_CWD = {'/var/spool/exim', '/etc/csf', '/var/spool/cron', '/usr/local/cpanel/whostmgr/docroot'}
 MONTHS = {m: i for i, m in enumerate(['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'], 1)}
+
+
+def to_timestamp(d):
+    """Convierte datetime a timestamp Unix (compatible con Python 2.7 y 3)."""
+    if d is None:
+        return None
+    if hasattr(d, 'timestamp'):
+        return d.timestamp()
+    return time.mktime(d.timetuple()) + d.microsecond / 1e6
+
+
+def open_log_file(path):
+    """Abre un archivo de log soportando compresión gzip y compatibilidad Python 2 y 3."""
+    if path.endswith('.gz'):
+        if sys.version_info[0] < 3:
+            return gzip.open(path, 'rb')
+        return io.TextIOWrapper(gzip.open(path, 'rb'), encoding='utf-8', errors='replace')
+    else:
+        if sys.version_info[0] < 3:
+            return open(path, 'r')
+        return io.open(path, 'r', encoding='utf-8', errors='replace')
 
 
 def detect_server_type():
@@ -114,8 +142,12 @@ def clean_subject(value):
     if not value:
         return '(asunto no registrado)'
     try:
-        decoded = str(make_header(decode_header(value)))
-    except (ValueError, UnicodeError, LookupError):
+        if sys.version_info[0] < 3:
+            h = make_header(decode_header(value))
+            decoded = unicode(h).encode('utf-8', 'replace')
+        else:
+            decoded = str(make_header(decode_header(value)))
+    except (ValueError, UnicodeError, LookupError, Exception):
         decoded = value
     return re.sub(r'\s+', ' ', decoded).strip()[:160]
 
@@ -139,7 +171,7 @@ def is_outbound_arrival(sender, protocol, auth, user_field, ip):
 
 def get_log_files(stems, since=None):
     """Localiza los archivos de log actuales y rotados (incluidos .gz)."""
-    cutoff = (since - dt.timedelta(hours=4)).timestamp() if since else None
+    cutoff = to_timestamp(since - dt.timedelta(hours=4)) if since else None
     result = set()
     for stem in stems:
         for name in glob.glob(stem + '*'):
@@ -160,14 +192,20 @@ def get_log_files(stems, since=None):
 def read_lines(paths, counter_dict):
     """Generador que lee líneas de múltiples archivos (texto plano o gzip)."""
     for path in paths:
+        fh = None
         try:
-            opener = gzip.open if path.endswith('.gz') else open
-            with opener(path, 'rt', encoding='utf-8', errors='replace') as fh:
-                counter_dict['files_read'] += 1
-                for line in fh:
-                    yield line.rstrip('\n')
-        except (OSError, EOFError) as exc:
+            fh = open_log_file(path)
+            counter_dict['files_read'] += 1
+            for line in fh:
+                yield line.rstrip('\r\n')
+        except (OSError, IOError, EOFError) as exc:
             print('AVISO: No se pudo leer %s: %s' % (path, exc), file=sys.stderr)
+        finally:
+            if fh is not None:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
 
 
 def parse_syslog_time(line, now):
@@ -224,52 +262,59 @@ def search_webmail_forwarder(access_logs, target_user, target_emails, send_times
     seen_lines = set()
 
     for path in access_logs:
+        fh = None
         try:
-            opener = gzip.open if path.endswith('.gz') else open
-            with opener(path, 'rt', encoding='utf-8', errors='replace') as fh:
-                for line in fh:
-                    # Nos interesan accesos con X-Forwarded-For
-                    if 'X-Forwarded-For:' not in line and 'X-Forwarded-For' not in line:
+            fh = open_log_file(path)
+            for line in fh:
+                line = line.rstrip('\r\n')
+                # Nos interesan accesos con X-Forwarded-For
+                if 'X-Forwarded-For:' not in line and 'X-Forwarded-For' not in line:
+                    continue
+
+                # Verificamos si coincide usuario o cuenta
+                line_matches_target = False
+                if target_user and target_user.lower() in line.lower():
+                    line_matches_target = True
+                if not line_matches_target and target_emails:
+                    for em in target_emails:
+                        if em.lower() in line.lower():
+                            line_matches_target = True
+                            break
+                if not line_matches_target and not target_user and not target_emails:
+                    # Modo general: considerar accesos relevantes
+                    line_matches_target = True
+
+                if not line_matches_target:
+                    continue
+
+                # Extraer timestamp de la línea
+                time_stamp = parse_cpanel_access_time(line)
+                if time_stamp and send_times:
+                    # Verificar si cae dentro de la ventana de alguno de los envíos
+                    is_near_send = False
+                    for st in send_times:
+                        if abs((time_stamp - st).total_seconds()) <= window_seconds:
+                            is_near_send = True
+                            break
+                    if not is_near_send and len(send_times) > 0:
                         continue
 
-                    # Verificamos si coincide usuario o cuenta
-                    line_matches_target = False
-                    if target_user and target_user.lower() in line.lower():
-                        line_matches_target = True
-                    if not line_matches_target and target_emails:
-                        for em in target_emails:
-                            if em.lower() in line.lower():
-                                line_matches_target = True
-                                break
-                    if not line_matches_target and not target_user and not target_emails:
-                        # Modo general: considerar accesos relevantes
-                        line_matches_target = True
-
-                    if not line_matches_target:
-                        continue
-
-                    # Extraer timestamp de la línea
-                    time_stamp = parse_cpanel_access_time(line)
-                    if time_stamp and send_times:
-                        # Verificar si cae dentro de la ventana de alguno de los envíos
-                        is_near_send = False
-                        for st in send_times:
-                            if abs((time_stamp - st).total_seconds()) <= window_seconds:
-                                is_near_send = True
-                                break
-                        if not is_near_send and len(send_times) > 0:
-                            continue
-
-                    # Extraer IP de X-Forwarded-For
-                    m_fwd = X_FORWARDED_FOR.search(line)
-                    if m_fwd:
-                        real_ip = m_fwd.group(1)
-                        matched_forwarders[real_ip] += 1
-                        if line not in seen_lines and len(raw_evidence) < 15:
-                            seen_lines.add(line)
-                            raw_evidence.append(line)
-        except (OSError, EOFError):
+                # Extraer IP de X-Forwarded-For
+                m_fwd = X_FORWARDED_FOR.search(line)
+                if m_fwd:
+                    real_ip = m_fwd.group(1)
+                    matched_forwarders[real_ip] += 1
+                    if line not in seen_lines and len(raw_evidence) < 15:
+                        seen_lines.add(line)
+                        raw_evidence.append(line)
+        except (OSError, IOError, EOFError):
             continue
+        finally:
+            if fh is not None:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
 
     return matched_forwarders, raw_evidence
 
@@ -281,6 +326,8 @@ def build_report_section(out, title, counter, top=20, unit=''):
         out.append('Sin registros.')
         return
     for item, count in counter.most_common(top):
+        if sys.version_info[0] < 3 and isinstance(item, unicode):
+            item = item.encode('utf-8', 'replace')
         out.append('{0:>8} {1} {2}'.format(count, unit, item))
 
 
@@ -292,10 +339,10 @@ def main():
 
     epilog = (
         "Ejemplos de ejecución directa en terminal (One-liner):\n"
-        "  python3 <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/01_abuse_mail_investigator.py)\n"
-        "  python3 <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/01_abuse_mail_investigator.py) --email cuenta@dominio.com --days 5\n"
-        "  python3 <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/01_abuse_mail_investigator.py) --domain dominio.com --top 30\n"
-        "  python3 <(curl -sL https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/01_abuse_mail_investigator.py) --server directadmin\n"
+        "  python <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/01_abuse_mail_investigator.py)\n"
+        "  python <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/01_abuse_mail_investigator.py) --email cuenta@dominio.com --days 5\n"
+        "  python <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/01_abuse_mail_investigator.py) --domain dominio.com --top 30\n"
+        "  python <(curl -sL https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/01_abuse_mail_investigator.py) --server directadmin\n"
     )
     parser = argparse.ArgumentParser(
         description='01. Abuse Mail Investigator — Auditoría Forense de Exim, Dovecot y Webmail (cPanel & DirectAdmin)',
@@ -730,14 +777,21 @@ def main():
     out.append("FIN DEL REPORTE")
     out.append("=" * 80)
 
+    if sys.version_info[0] < 3:
+        out = [s.encode('utf-8', 'replace') if isinstance(s, unicode) else str(s) for s in out]
+
     final_report = "\n".join(out) + "\n"
 
     if args.output:
         try:
-            with open(args.output, 'w', encoding='utf-8') as fh:
-                fh.write(final_report)
+            if sys.version_info[0] < 3:
+                with open(args.output, 'w') as fh:
+                    fh.write(final_report)
+            else:
+                with open(args.output, 'w', encoding='utf-8') as fh:
+                    fh.write(final_report)
             print("[+] Reporte de auditoría guardado exitosamente en: %s" % args.output)
-        except OSError as e:
+        except (OSError, IOError) as e:
             print("[!] Error al guardar el reporte: %s" % e, file=sys.stderr)
             print(final_report)
     else:
