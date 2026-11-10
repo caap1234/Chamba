@@ -6,16 +6,27 @@ export PATH="/usr/local/bin:/usr/local/directadmin:$PATH"
 if (( EUID != 0 )); then echo 'ERROR: Ejecutar como root.' >&2; exit 2; fi
 
 CONF=/usr/local/directadmin/custombuild/options.conf
-DA_BIN=""
-if command -v da >/dev/null 2>&1; then
-  DA_BIN="da build"
-elif [[ -x /usr/local/directadmin/custombuild/build ]]; then
-  DA_BIN="/usr/local/directadmin/custombuild/build"
+CB_DIR=/usr/local/directadmin/custombuild
+
+if [[ ! -f "$CONF" ]]; then
+  echo 'ERROR: No se detectó DirectAdmin/CustomBuild (options.conf no existe).' >&2
+  exit 2
 fi
 
-if [[ ! -f "$CONF" || -z "$DA_BIN" ]]; then
-  echo 'ERROR: No se detectó DirectAdmin/CustomBuild.' >&2; exit 2
+if [[ -f "$CB_DIR/build" && ! -x "$CB_DIR/build" ]]; then
+  chmod +x "$CB_DIR/build" 2>/dev/null || true
 fi
+
+run_cb() {
+  if [[ -x "$CB_DIR/build" ]]; then
+    (cd "$CB_DIR" && ./build "$@")
+  elif command -v da >/dev/null 2>&1 && da build --help >/dev/null 2>&1; then
+    da build "$@"
+  else
+    echo 'ERROR: No se encontró CustomBuild (/usr/local/directadmin/custombuild/build).' >&2
+    return 1
+  fi
+}
 
 LOG="/root/php_security_directadmin_$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee -a "$LOG") 2>&1
@@ -90,9 +101,9 @@ fi
 
 if (( needs )); then
   echo '===== ACTUALIZANDO METADATOS DE CUSTOMBUILD ====='
-  if $DA_BIN update; then
+  if run_cb update; then
     echo '===== RECOMPILANDO PHP (aplicando versiones y parches de CustomBuild) ====='
-    if ! $DA_BIN php; then
+    if ! run_cb php; then
       echo 'ERROR: CustomBuild no finalizó correctamente.'
       failed=1
     fi
