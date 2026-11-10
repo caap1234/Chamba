@@ -154,6 +154,10 @@ echo "Sincronizando índices de paquetes del sistema..."
 if [[ "$FAMILY" == "debian" ]]; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq 2>/dev/null || true
+elif [[ "$PKG_MGR" == "dnf" ]]; then
+  dnf makecache --refresh -q 2>/dev/null || true
+elif [[ "$PKG_MGR" == "yum" ]]; then
+  yum makecache fast -q 2>/dev/null || true
 fi
 
 declare -a PENDING_PACKAGES=()
@@ -248,8 +252,12 @@ if (( ${#needs_branches[@]} )); then
       failed=1
     fi
   elif [[ "$FAMILY" == "redhat" ]]; then
+    local -a upgrade_flags=("-y")
+    if [[ "$PKG_MGR" == "dnf" ]]; then
+      upgrade_flags+=("--refresh")
+    fi
     echo "Ejecutando $PKG_MGR upgrade..."
-    if ! $PKG_MGR upgrade -y --refresh "${PENDING_PACKAGES[@]}"; then
+    if ! $PKG_MGR upgrade "${upgrade_flags[@]}" "${PENDING_PACKAGES[@]}"; then
       echo "ERROR: $PKG_MGR reportó un fallo al actualizar los paquetes."
       failed=1
     fi
