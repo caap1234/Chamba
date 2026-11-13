@@ -2,7 +2,7 @@
 """Auditoría local y de solo lectura de enlaces (phishing/malware) en correos procesados por Exim (cPanel y DirectAdmin).
 
 Extrae dominios y URLs de phishing cruzando /var/log/exim_mainlog con buzones Maildir.
-Por defecto opera 100% en memoria con salida minimalista directa en terminal.
+Por defecto opera 100% en memoria con salida formateada directa en terminal.
 
 Ejecución directa One-Liner en terminal:
   python3 <(wget -qO- "https://raw.githubusercontent.com/caap1234/Chamba/main/secops/exim_phishing_links.py?$(date +%s)")
@@ -451,7 +451,7 @@ def main():
     ap.add_argument('--subject', default=DEFAULT_SUBJECT_RE, help='Expresión regular para filtrar por asunto del correo')
     ap.add_argument('--sender-domain', action='append', help='Filtrar por dominio del remitente')
     ap.add_argument('--all-senders', action='store_true', default=False, help='Evaluar todos los remitentes sin filtrar')
-    ap.add_argument('--verbose', action='store_true', help='Mostrar progreso detallado y lista completa de dominios alojados')
+    ap.add_argument('--verbose', action='store_true', help='Mostrar progreso detallado de lectura de logs y buzones')
     ap.add_argument('--csv', action='store_true', help='Exportar resultados a archivos CSV')
     ap.add_argument('--out', default=None, help='Prefijo para los archivos CSV de salida (activa --csv)')
     ap.add_argument('--eml', help='Modo de prueba local con archivo .eml individual')
@@ -600,7 +600,7 @@ def main():
                 hosts[r['url_host']] += 1
 
     # ==========================
-    # SALIDA FINAL CONCISA
+    # SALIDA FINAL DETALLADA
     # ==========================
     print('=' * 75)
     print('  ENLACES Y DOMINIOS DE PHISHING DETECTADOS')
@@ -613,9 +613,32 @@ def main():
         print('\nENLACES (URLs):')
         for url, n in counts.most_common():
             print(f'  • {url}')
+
+        print('\n' + '=' * 75)
+        print('  DETALLE DE MENSAJES RECUPERADOS (ID EXIM Y DESTINATARIO)')
+        print('=' * 75)
+        for i, r in enumerate(all_extracted_rows, 1):
+            print(f'  [{i}] ID Exim:      {r["exim_id"]} (IP Origen: {r["source_ip"] or "No registrada"})')
+            print(f'      Destinatario: {r["recipient"]}')
+            print(f'      Remitente:    {r["sender"]}')
+            print(f'      Asunto:       {r["subject"]}')
+            print(f'      Texto Enlace: {r["anchor_text"]} [Acción: {r["action_link"]}]')
+            print(f'      URL:          {r["url"]}')
+            print(f'      Archivo Mail: {r["mail_file"]}')
+            if i < len(all_extracted_rows):
+                print('      ' + '-' * 65)
     else:
         print('[!] Los archivos de los correos ya no se encuentran en los buzones del servidor')
-        print('    (fueron descargados por POP3, eliminados por el usuario o purgados por antispam).')
+        print('    (fueron descargados por POP3, eliminados por el usuario o purgados por antispam).\n')
+
+        delivered_eids = [eid for eid, info in messages.items() if info.get('delivery_status', ('', ''))[0] == 'ENTREGADO_BUZON']
+        if delivered_eids:
+            print('ÚLTIMOS CORREOS ENTREGADOS SEGÚN LOGS DE EXIM (PARA REVISIÓN):')
+            for eid in delivered_eids[:20]:
+                info = messages[eid]
+                rcpt = info.get('delivery_rcpt') or info.get('recipient')
+                print(f'  • ID Exim: {eid:<25} | Destinatario: {rcpt}')
+                print(f'    Remitente: {info.get("sender"):<23} | Asunto: {info.get("subject")[:45]}')
     print('=' * 75)
 
     if export_csv and all_extracted_rows:
