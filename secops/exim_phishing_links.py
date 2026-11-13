@@ -28,7 +28,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlsplit
 
-DEFAULT_SUBJECT_RE = r'(Aviso de expiraci(?:\\363|ó|=F3|=C3=B3|o)n de dominios|\bNeubox\b)'
+DEFAULT_SUBJECT_RE = r'(Aviso de expiraci(?:\\363|ó|=F3|=C3=B3|o)n|expiraci[óo\\363]n de dominios|renovaci[óo\\363]n.*dominio|suspensi[óo\\363]n.*dominio|\bNeubox\b)'
 ENTRY_RE = re.compile(r'^\S+\s+\S+\s+(?:\[\d+\]\s+)?([A-Za-z0-9]{5,}-[A-Za-z0-9]+-[A-Za-z0-9]+|\S+)\s+<=\s+(\S+)\s+(.*)$')
 EXIM_RE = re.compile(r'\bid\s*=?\s*([A-Za-z0-9]{5,}-[A-Za-z0-9]+-[A-Za-z0-9]+)\b')
 IP_RE = re.compile(r'\[(\d{1,3}(?:\.\d{1,3}){3})\]')
@@ -83,7 +83,7 @@ def clean_url(raw_url):
 
 
 def links_from_message(raw):
-    """Extrae enlaces y texto de anclaje de un correo electrónico en bytes."""
+    """Extrae enlaces y texto de anclaje de un correo electrónico en bytes (soporta Base64/Quoted-Printable)."""
     message = BytesParser(policy=policy.default).parsebytes(raw)
     found = set()
 
@@ -106,7 +106,6 @@ def links_from_message(raw):
         if not text:
             continue
 
-        # Si contiene etiquetas HTML o es text/html, parsear enlaces <a>
         if ctype == 'text/html' or '<a ' in text.lower():
             parser = Anchors()
             try:
@@ -115,17 +114,34 @@ def links_from_message(raw):
                     u = clean_url(url)
                     if u:
                         anchor_text = ' '.join(label.split())[:180]
-                        found.add((u, anchor_text or '(sin texto)'))
+                        found.add((u, anchor_text or '(enlace web)'))
             except Exception:
                 pass
 
-        # Buscar URLs en texto plano
-        for url in URL_RE.findall(text):
-            u = clean_url(url)
-            if u:
-                found.add((u, 'texto plano'))
+            # URLs en el HTML no contenidas en etiquetas <a>
+            known_urls = {u for u, _ in found}
+            for url in URL_RE.findall(text):
+                u = clean_url(url)
+                if u and u not in known_urls:
+                    found.add((u, 'texto plano'))
+        else:
+            for url in URL_RE.findall(text):
+                u = clean_url(url)
+                if u:
+                    found.add((u, 'texto plano'))
 
     return message, sorted(found)
+
+
+def extract_ip_from_message(message):
+    """Extrae la IP pública origen desde los encabezados Received si no estaba en el log."""
+    for r in message.get_all('Received', []) or []:
+        for ip in IP_RE.findall(str(r)):
+            if not ip.startswith(('127.', '10.', '192.168.', '172.16.', '172.17.', '172.18.', '172.19.',
+                                  '172.20.', '172.21.', '172.22.', '172.23.', '172.24.', '172.25.',
+                                  '172.26.', '172.27.', '172.28.', '172.29.', '172.30.', '172.31.', '0.')):
+                return ip
+    return ''
 
 
 def read_log(fp):
@@ -141,6 +157,7 @@ def read_log(fp):
 def select_ids(logs, allowed_senders, subject_pattern, cutoff_str=None):
     """Escanea los logs de Exim y selecciona los IDs que coinciden con los filtros."""
     messages = {}
+    source_ips = {}
     subject_re = re.compile(subject_pattern, re.I)
 
     for fp in logs:
@@ -157,15 +174,17 @@ def select_ids(logs, allowed_senders, subject_pattern, cutoff_str=None):
 
             exim_id, sender, rest = m.groups()
 
+            # Recordar IP si viene en la línea de llegada
+            ip_m = IP_RE.search(rest)
+            if ip_m:
+                source_ips[exim_id] = ip_m.group(1)
+
             if allowed_senders:
                 domain = sender.lower().rsplit('@', 1)[-1]
                 if domain not in allowed_senders:
                     continue
 
-            # Validar que sea recepción (H=... y protocolo SMTP/ESMTP)
-            if ' H=' not in rest or not re.search(r'\bP=(?:e?smtp[a-z]*)', rest, re.I):
-                continue
-
+            # Buscar Asunto (T=...)
             t = re.search(r'\bT="([^"]*)"', rest)
             if not t:
                 continue
@@ -176,14 +195,20 @@ def select_ids(logs, allowed_senders, subject_pattern, cutoff_str=None):
             if not subject_re.search(decoded_subj) and not subject_re.search(raw_subject):
                 continue
 
-            ip = IP_RE.search(rest)
-            r = re.search(r'\bfor\s+(.+)$', rest)
+            parent_m = re.search(r'\bR=([A-Za-z0-9]{5,}-[A-Za-z0-9]+-[A-Za-z0-9]+)\b', rest)
+            parent_id = parent_m.group(1) if parent_m else ''
+            msgid_m = re.search(r'\bid=([^\s]+)', rest)
+            msg_id = msgid_m.group(1).strip('<>') if msgid_m else ''
+            src_ip = ip_m.group(1) if ip_m else source_ips.get(parent_id, '')
+            r_m = re.search(r'\bfor\s+(.+)$', rest)
 
             messages[exim_id] = {
                 'sender': sender,
                 'subject': decoded_subj or raw_subject,
-                'source_ip': ip.group(1) if ip else '',
-                'recipient': r.group(1).strip() if r else ''
+                'source_ip': src_ip,
+                'recipient': r_m.group(1).strip() if r_m else '',
+                'parent_id': parent_id,
+                'msg_id': msg_id
             }
 
     return messages
@@ -230,8 +255,8 @@ def maildir_files(base_dirs, cutoff_ts, progress):
     print(f'[PROGRESO] Terminado recorrido Maildir: {scanned:,} archivos recientes evaluados', flush=True)
 
 
-def header_ids(path, byte_limit=131072):
-    """Extrae IDs de Exim del encabezado de un archivo de correo."""
+def header_identifiers(path, byte_limit=131072):
+    """Extrae IDs de Exim y Message-ID del encabezado de un correo."""
     try:
         with open(path, 'rb') as f:
             buf = bytearray()
@@ -240,9 +265,11 @@ def header_ids(path, byte_limit=131072):
                 if line in (b'\n', b'\r\n') or len(buf) > byte_limit:
                     break
     except (OSError, PermissionError):
-        return set()
+        return set(), set()
     head = bytes(buf).decode('latin1', errors='replace')
-    return set(EXIM_RE.findall(head))
+    eids = set(EXIM_RE.findall(head))
+    msg_ids = set(re.findall(r'(?i)\bmessage-id:\s*<?([^>\s]+)>?', head))
+    return eids, msg_ids
 
 
 def output_row(info, exim_id, raw, path, writer):
@@ -250,6 +277,7 @@ def output_row(info, exim_id, raw, path, writer):
     message, links = links_from_message(raw)
     recipients = info.get('recipient', '') or ', '.join(filter(None, [message.get('To'), message.get('Delivered-To')]))
     subj = str(info.get('subject') or message.get('Subject') or '')
+    src_ip = info.get('source_ip') or extract_ip_from_message(message)
 
     for url, text in links:
         try:
@@ -262,7 +290,7 @@ def output_row(info, exim_id, raw, path, writer):
             'sender': info.get('sender') or message.get('Return-Path', ''),
             'recipient': recipients,
             'subject': subj,
-            'source_ip': info.get('source_ip', ''),
+            'source_ip': src_ip,
             'url': url,
             'url_host': host,
             'anchor_text': text,
@@ -383,22 +411,44 @@ def main():
             mail_bases = find_mail_dirs()
             if mail_bases:
                 print(f'[MAILDIR] Analizando {len(mail_bases)} directorios de correo (últimos {args.days} días)...', flush=True)
-                target_ids = set(messages.keys()) - set(matches.keys())
+                target_eids = set(messages.keys()) - set(matches.keys())
+
+                id_to_main_eid = {}
+                msgid_to_main_eid = {}
+                for eid, info in messages.items():
+                    id_to_main_eid[eid] = eid
+                    if info.get('parent_id'):
+                        id_to_main_eid[info['parent_id']] = eid
+                    if info.get('msg_id'):
+                        msgid_to_main_eid[info['msg_id']] = eid
+
                 for path in maildir_files(mail_bases, cutoff_ts, args.progress):
-                    if not target_ids:
+                    if not target_eids:
                         break
-                    ids = header_ids(path) & target_ids
-                    if not ids:
+
+                    eids, msg_ids = header_identifiers(path)
+                    candidate_eids = set()
+                    for eid in eids:
+                        if eid in id_to_main_eid:
+                            candidate_eids.add(id_to_main_eid[eid])
+                    for mid in msg_ids:
+                        if mid in msgid_to_main_eid:
+                            candidate_eids.add(msgid_to_main_eid[mid])
+
+                    matched_now = candidate_eids & target_eids
+                    if not matched_now:
                         continue
+
                     try:
                         raw = Path(path).read_bytes()
                     except OSError:
                         continue
-                    for eid in ids:
-                        if eid not in matches:
-                            matches[eid] = (raw, path)
-                            target_ids.discard(eid)
-                            if len(matches) % 25 == 0:
+
+                    for meid in matched_now:
+                        if meid not in matches:
+                            matches[meid] = (raw, path)
+                            target_eids.discard(meid)
+                            if len(matches) % 25 == 0 or len(matches) == len(messages):
                                 print(f'[COINCIDENCIAS] {len(matches):,}/{len(messages):,} mensajes recuperados de buzones', flush=True)
             else:
                 print('[AVISO] No se detectaron directorios /home/*/mail ni /home/*/imap para Maildir.', flush=True)
