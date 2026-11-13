@@ -155,11 +155,55 @@ def read_log(fp):
         print(f'[ADVERTENCIA] No se puede leer {fp}: {exc}', file=sys.stderr, flush=True)
 
 
+def load_userdomains():
+    """Carga mapeo dominio -> usuario cPanel desde /etc/userdomains."""
+    ud = {}
+    if os.path.exists('/etc/userdomains'):
+        try:
+            with open('/etc/userdomains', 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and ':' in line and not line.startswith('#'):
+                        dom, user = line.split(':', 1)
+                        ud[dom.strip().lower()] = user.strip()
+        except OSError:
+            pass
+    return ud
+
+
+def load_userhomes():
+    """Carga mapeo usuario -> directorio home desde /etc/passwd."""
+    homes = {}
+    if os.path.exists('/etc/passwd'):
+        try:
+            with open('/etc/passwd', 'r') as f:
+                for line in f:
+                    parts = line.strip().split(':')
+                    if len(parts) >= 6:
+                        homes[parts[0]] = parts[5]
+        except OSError:
+            pass
+    return homes
+
+
+def parse_recipient(rcpt):
+    """Extrae usuario local, dominio y subcarpeta (ej. ventas+spam@dom.com -> ventas, dom.com, spam)."""
+    clean = rcpt.strip('<> ').split()[0] if rcpt else ''
+    if '@' not in clean:
+        return '', '', ''
+    local_part, domain = clean.rsplit('@', 1)
+    folder = ''
+    if '+' in local_part:
+        local_part, folder = local_part.split('+', 1)
+    return local_part.lower(), domain.lower(), folder.lower()
+
+
 def select_ids(logs, allowed_senders, subject_pattern, cutoff_str=None):
     """Escanea los logs de Exim y selecciona los IDs que coinciden con los filtros, analizando estados de entrega."""
     raw_messages = {}
     source_ips = {}
     delivery_status = {}
+    delivery_recipients = {}
     subject_re = re.compile(subject_pattern, re.I)
 
     for fp in logs:
@@ -215,6 +259,10 @@ def select_ids(logs, allowed_senders, subject_pattern, cutoff_str=None):
             sm = STATUS_RE.match(line)
             if sm:
                 eid, flag, rest = sm.groups()
+                rcpt_m = re.search(r'<([^>]+)>', rest)
+                if rcpt_m:
+                    delivery_recipients[eid] = rcpt_m.group(1)
+
                 if flag == '**':
                     reason = rest.split(':', 1)[-1].strip() if ':' in rest else rest
                     delivery_status[eid] = ('RECHAZADO', reason[:60])
@@ -235,18 +283,16 @@ def select_ids(logs, allowed_senders, subject_pattern, cutoff_str=None):
     parent_ids = {info['parent_id'] for info in raw_messages.values() if info.get('parent_id')}
 
     for eid, info in raw_messages.items():
-        # Si un ID es el padre de un mensaje ya reinyectado por spam-scanner, el hijo es el mensaje final
         if eid in parent_ids:
             continue
-        # Actualizar IP origen desde el padre si estaba disponible
         if not info.get('source_ip') and info.get('parent_id') in source_ips:
             info['source_ip'] = source_ips[info['parent_id']]
-        # Asociar estado de entrega
-        st = delivery_status.get(eid) or delivery_status.get(info.get('parent_id'), ('DESCONOCIDO', 'sin datos de entrega'))
+
+        st = delivery_status.get(eid) or delivery_status.get(info.get('parent_id'), ('DESCONOCIDO', 'sin datos'))
         info['delivery_status'] = st
+        info['delivery_rcpt'] = delivery_recipients.get(eid) or delivery_recipients.get(info.get('parent_id')) or info.get('recipient')
         messages[eid] = info
 
-    # Resumen de estadísticas de entrega
     stats = Counter(info['delivery_status'][0] for info in messages.values())
 
     return messages, raw_messages, stats
@@ -255,12 +301,10 @@ def select_ids(logs, allowed_senders, subject_pattern, cutoff_str=None):
 def find_mail_dirs():
     """Detecta los directorios base de correo compatibles con cPanel (/home, /home2...), DirectAdmin y vmail."""
     base_dirs = []
-    # Cubre /home, /home2, /home3, /usr/home, etc.
     home_roots = sorted(glob.glob('/home*') + glob.glob('/usr/home*'))
     for hroot in home_roots:
         if not os.path.isdir(hroot):
             continue
-        # Evitar carpetas de respaldo que no sean particiones de usuarios
         bname = os.path.basename(hroot)
         if bname.startswith(('home.bak', 'home_bak', 'home-bak')):
             continue
@@ -274,36 +318,6 @@ def find_mail_dirs():
     if os.path.isdir('/var/vmail'):
         base_dirs.append('/var/vmail')
     return sorted(set(base_dirs))
-
-
-def maildir_files(base_dirs, cutoff_ts, progress):
-    """Genera rutas de archivos en Maildir recientes en cur/, new/ y subcarpetas (.spam, .Junk, .Trash)."""
-    scanned = 0
-    for base in base_dirs:
-        for root, dirs, files in os.walk(base, followlinks=False):
-            dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
-            if os.path.basename(root) not in ('cur', 'new'):
-                continue
-
-            for name in files:
-                path = os.path.join(root, name)
-                try:
-                    mtime = os.path.getmtime(path)
-                    # Si mtime es menor a cutoff, revisar si el nombre del archivo empieza con timestamp Unix reciente
-                    if mtime < cutoff_ts:
-                        name_ts = int(name.split('.', 1)[0]) if name.split('.', 1)[0].isdigit() else 0
-                        if name_ts < cutoff_ts:
-                            continue
-                except (OSError, ValueError):
-                    continue
-                scanned += 1
-                if scanned % progress == 0:
-                    print(f'[PROGRESO] {scanned:,} archivos revisados en buzones...', flush=True)
-                yield path
-
-            dirs.clear()
-
-    print(f'[PROGRESO] Terminado recorrido Maildir: {scanned:,} archivos recientes evaluados', flush=True)
 
 
 def header_identifiers(path, byte_limit=131072):
@@ -323,10 +337,93 @@ def header_identifiers(path, byte_limit=131072):
     return eids, msg_ids
 
 
+def find_message_file_targeted(info, eid, userdomains, userhomes):
+    """Busca directamente en el buzón físico correspondiente al destinatario del correo."""
+    rcpt = info.get('delivery_rcpt') or info.get('recipient') or ''
+    local_part, domain, folder = parse_recipient(rcpt)
+    if not domain or not local_part:
+        return None
+
+    candidate_homes = []
+    user = userdomains.get(domain)
+    if user and user in userhomes:
+        candidate_homes.append(userhomes[user])
+
+    # Fallback si no está en userdomains
+    if not candidate_homes:
+        for p in glob.glob(f'/home*/mail/{domain}') + glob.glob(f'/home*/*/mail/{domain}'):
+            candidate_homes.append(os.path.dirname(os.path.dirname(p)))
+
+    search_dirs = []
+    for chome in candidate_homes:
+        mbox_base = os.path.join(chome, 'mail', domain, local_part)
+        if not os.path.isdir(mbox_base):
+            mbox_base = os.path.join(chome, 'imap', domain, local_part, 'Maildir')
+        if not os.path.isdir(mbox_base):
+            continue
+
+        # Subcarpetas estándar de Maildir (Inbox, spam, Junk, Trash, etc.)
+        subfolders = ['', '.spam', '.Junk', '.Spam', '.Trash', '.INBOX.spam', '.INBOX.junk']
+        for sub in subfolders:
+            fpath = os.path.join(mbox_base, sub) if sub else mbox_base
+            for leaf in ('new', 'cur'):
+                leaf_path = os.path.join(fpath, leaf)
+                if os.path.isdir(leaf_path):
+                    search_dirs.append(leaf_path)
+
+    target_eids = {eid}
+    if info.get('parent_id'):
+        target_eids.add(info['parent_id'])
+    target_msgid = info.get('msg_id', '').lower()
+
+    for sdir in search_dirs:
+        try:
+            for fname in os.listdir(sdir):
+                fpath = os.path.join(sdir, fname)
+                if not os.path.isfile(fpath):
+                    continue
+                eids, msg_ids = header_identifiers(fpath)
+                if (eids & target_eids) or (target_msgid and target_msgid in {m.lower() for m in msg_ids}):
+                    return fpath
+        except OSError:
+            continue
+
+    return None
+
+
+def maildir_files(base_dirs, cutoff_ts, progress):
+    """Genera rutas de archivos en Maildir recientes en cur/, new/ y subcarpetas."""
+    scanned = 0
+    for base in base_dirs:
+        for root, dirs, files in os.walk(base, followlinks=False):
+            dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
+            if os.path.basename(root) not in ('cur', 'new'):
+                continue
+
+            for name in files:
+                path = os.path.join(root, name)
+                try:
+                    mtime = os.path.getmtime(path)
+                    if mtime < cutoff_ts:
+                        name_ts = int(name.split('.', 1)[0]) if name.split('.', 1)[0].isdigit() else 0
+                        if name_ts < cutoff_ts:
+                            continue
+                except (OSError, ValueError):
+                    continue
+                scanned += 1
+                if scanned % progress == 0:
+                    print(f'[PROGRESO] {scanned:,} archivos revisados en buzones...', flush=True)
+                yield path
+
+            dirs.clear()
+
+    print(f'[PROGRESO] Terminado recorrido Maildir: {scanned:,} archivos recientes evaluados', flush=True)
+
+
 def output_row(info, exim_id, raw, path, writer):
     """Escribe los enlaces extraídos en el archivo de detalles CSV."""
     message, links = links_from_message(raw)
-    recipients = info.get('recipient', '') or ', '.join(filter(None, [message.get('To'), message.get('Delivered-To')]))
+    recipients = info.get('delivery_rcpt') or info.get('recipient', '') or ', '.join(filter(None, [message.get('To'), message.get('Delivered-To')]))
     subj = str(info.get('subject') or message.get('Subject') or '')
     src_ip = info.get('source_ip') or extract_ip_from_message(message)
 
@@ -431,18 +528,35 @@ def main():
 
             cutoff_date = dt.datetime.now() - dt.timedelta(days=args.days)
             cutoff_str = cutoff_date.strftime('%Y-%m-%d')
-            # Margen de gracia de +1 día para buzones Maildir por diferencias de zona horaria
             cutoff_ts = (dt.datetime.now() - dt.timedelta(days=args.days + 1)).timestamp()
 
             messages, raw_messages, delivery_stats = select_ids(logs, allowed_senders, args.subject, cutoff_str)
             print(f'[INFO] Eventos en logs: {len(raw_messages):,} | Correos únicos consolidados: {len(messages):,}', flush=True)
 
             print('\n[ANÁLISIS DE ENTREGAS EN LOGS]:')
-            print(f'  - Entregados a buzones locales (=>): {delivery_stats.get("ENTREGADO_BUZON", 0):,}')
-            print(f'  - Rechazados por destinatario inválido (**): {delivery_stats.get("RECHAZADO", 0):,}')
-            print(f'  - Descartados a /dev/null o blackhole (=>): {delivery_stats.get("DESCARTADO_FILTRO", 0):,}')
-            if delivery_stats.get('DIFERIDO_COLA', 0):
-                print(f'  - Diferidos o en cola (==): {delivery_stats.get("DIFERIDO_COLA", 0):,}')
+            delivered_local = delivery_stats.get("ENTREGADO_BUZON", 0)
+            rejected_user = delivery_stats.get("RECHAZADO", 0)
+            discarded_filter = delivery_stats.get("DESCARTADO_FILTRO", 0)
+            deferred_queue = delivery_stats.get("DIFERIDO_COLA", 0)
+
+            print(f'  - Entregados a buzones locales (=>): {delivered_local:,}')
+            print(f'  - Rechazados por destinatario inválido (**): {rejected_user:,}')
+            print(f'  - Descartados a /dev/null o blackhole (=>): {discarded_filter:,}')
+            if deferred_queue:
+                print(f'  - Diferidos o en cola (==): {deferred_queue:,}')
+
+            # Ranking de buzones objetivo más atacados
+            rcpt_counter = Counter()
+            for info in messages.values():
+                r = info.get('delivery_rcpt') or info.get('recipient')
+                if r:
+                    rcpt_counter[r.lower().strip('<>')] += 1
+
+            if rcpt_counter:
+                print('\n[TOP DESTINATARIOS EN LOGS]:')
+                for rcpt, count in rcpt_counter.most_common(10):
+                    print(f'  {count:>4}  {rcpt}')
+
             print('-' * 75, flush=True)
 
             if not messages:
@@ -469,53 +583,72 @@ def main():
 
             print(f'[COLA] Mensajes recuperados de la cola de Exim: {len(matches):,} (consultados: {checked_queue:,})', flush=True)
 
-            # 2. Buscar en buzones Maildir
-            mail_bases = find_mail_dirs()
-            if mail_bases:
-                print(f'[MAILDIR] Analizando {len(mail_bases)} directorios de correo en /home*, /home2*...', flush=True)
-                target_eids = set(messages.keys()) - set(matches.keys())
+            # 2. Búsqueda Dirigida por Buzón Específico (Alta Precisión)
+            userdomains = load_userdomains()
+            userhomes = load_userhomes()
 
-                id_to_main_eid = {}
-                msgid_to_main_eid = {}
-                for eid, info in messages.items():
-                    id_to_main_eid[eid] = eid
-                    if info.get('parent_id'):
-                        id_to_main_eid[info['parent_id']] = eid
-                    if info.get('msg_id'):
-                        msgid_to_main_eid[info['msg_id']] = eid
-
-                for path in maildir_files(mail_bases, cutoff_ts, args.progress):
-                    if not target_eids:
-                        break
-
-                    eids, msg_ids = header_identifiers(path)
-                    candidate_eids = set()
-                    for eid in eids:
-                        if eid in id_to_main_eid:
-                            candidate_eids.add(id_to_main_eid[eid])
-                    for mid in msg_ids:
-                        if mid in msgid_to_main_eid:
-                            candidate_eids.add(msgid_to_main_eid[mid])
-
-                    matched_now = candidate_eids & target_eids
-                    if not matched_now:
-                        continue
-
+            pending_eids = [eid for eid in messages if eid not in matches and messages[eid]['delivery_status'][0] == 'ENTREGADO_BUZON']
+            print(f'[MAILDIR-DIRIGIDO] Buscando directamente en los buzones de los {len(pending_eids):,} correos entregados...', flush=True)
+            targeted_found = 0
+            for eid in pending_eids:
+                fpath = find_message_file_targeted(messages[eid], eid, userdomains, userhomes)
+                if fpath:
                     try:
-                        raw = Path(path).read_bytes()
+                        raw = Path(fpath).read_bytes()
+                        matches[eid] = (raw, fpath)
+                        targeted_found += 1
                     except OSError:
-                        continue
+                        pass
 
-                    for meid in matched_now:
-                        if meid not in matches:
-                            matches[meid] = (raw, path)
-                            target_eids.discard(meid)
-                            if len(matches) % 25 == 0 or len(matches) == len(messages):
-                                print(f'[COINCIDENCIAS] {len(matches):,}/{len(messages):,} mensajes recuperados de buzones', flush=True)
-            else:
-                print('[AVISO] No se detectaron directorios de correo en /home* ni /var/vmail.', flush=True)
+            print(f'[MAILDIR-DIRIGIDO] Mensajes recuperados en sus buzones: {targeted_found:,}/{len(pending_eids):,}', flush=True)
 
-        print(f'[EXTRACCIÓN] Procesando enlaces de {len(matches):,} mensajes físicamente disponibles...', flush=True)
+            # 3. Barrido General en Maildirs (para cualquier correo pendiente)
+            target_eids = set(messages.keys()) - set(matches.keys())
+            if target_eids:
+                mail_bases = find_mail_dirs()
+                if mail_bases:
+                    print(f'[MAILDIR-GENERAL] Analizando {len(mail_bases)} directorios de correo para los {len(target_eids):,} pendientes...', flush=True)
+
+                    id_to_main_eid = {}
+                    msgid_to_main_eid = {}
+                    for eid in target_eids:
+                        info = messages[eid]
+                        id_to_main_eid[eid] = eid
+                        if info.get('parent_id'):
+                            id_to_main_eid[info['parent_id']] = eid
+                        if info.get('msg_id'):
+                            msgid_to_main_eid[info['msg_id']] = eid
+
+                    for path in maildir_files(mail_bases, cutoff_ts, args.progress):
+                        if not target_eids:
+                            break
+
+                        eids, msg_ids = header_identifiers(path)
+                        candidate_eids = set()
+                        for eid in eids:
+                            if eid in id_to_main_eid:
+                                candidate_eids.add(id_to_main_eid[eid])
+                        for mid in msg_ids:
+                            if mid in msgid_to_main_eid:
+                                candidate_eids.add(msgid_to_main_eid[mid])
+
+                        matched_now = candidate_eids & target_eids
+                        if not matched_now:
+                            continue
+
+                        try:
+                            raw = Path(path).read_bytes()
+                        except OSError:
+                            continue
+
+                        for meid in matched_now:
+                            if meid not in matches:
+                                matches[meid] = (raw, path)
+                                target_eids.discard(meid)
+                                if len(matches) % 25 == 0 or len(matches) == len(messages):
+                                    print(f'[COINCIDENCIAS] {len(matches):,}/{len(messages):,} mensajes recuperados', flush=True)
+
+        print(f'\n[EXTRACCIÓN] Procesando enlaces de {len(matches):,} mensajes físicamente disponibles...', flush=True)
         for eid, (raw, path) in matches.items():
             try:
                 urls = output_row(messages.get(eid, {}), eid, raw, path, writer)
@@ -559,6 +692,11 @@ def main():
     print(f'[✓] Detalle completo:  {details_csv}')
     print(f'[✓] URLs únicas:       {urls_csv}')
     print(f'[✓] Dominios únicos:   {doms_csv}')
+    if delivered_count > len(found_ids):
+        diff = delivered_count - len(found_ids)
+        print(f'\n[NOTA FORENSE] {diff:,} correos fueron registrados como entregados por Exim pero ya no están')
+        print('  en el servidor. Causas habituales: descarga por POP3, eliminación por el usuario vía Webmail/IMAP,')
+        print('  o purga automática de buzones de Spam por políticas de cPanel.')
     print('=' * 75)
     return 0
 
