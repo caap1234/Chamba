@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Auditoría local y de solo lectura de enlaces (phishing/malware) en correos procesados por Exim (cPanel y DirectAdmin).
 
-Extrae URLs y dominios de correos que coinciden con patrones de asuntos o remitentes sospechosos,
-cruzando registros de /var/log/exim_mainlog con buzones Maildir locales y la cola de Exim.
-Por defecto opera 100% en memoria y muestra los resultados en terminal sin generar archivos en disco.
+Extrae dominios alojados afectados y URLs de phishing cruzando /var/log/exim_mainlog con buzones Maildir.
+Por defecto opera 100% en memoria con salida limpia y directa en terminal.
 
 Ejecución directa One-Liner en terminal:
   python3 <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/secops/exim_phishing_links.py)
@@ -120,7 +119,6 @@ def links_from_message(raw):
             except Exception:
                 pass
 
-            # URLs en el HTML no contenidas en etiquetas <a>
             known_urls = {u for u, _ in found}
             for url in URL_RE.findall(text):
                 u = clean_url(url)
@@ -152,8 +150,8 @@ def read_log(fp):
     try:
         with op(fp, 'rt', encoding='utf-8', errors='replace') as f:
             yield from f
-    except (OSError, EOFError) as exc:
-        print(f'[ADVERTENCIA] No se puede leer {fp}: {exc}', file=sys.stderr, flush=True)
+    except (OSError, EOFError):
+        pass
 
 
 def load_userdomains():
@@ -199,7 +197,7 @@ def parse_recipient(rcpt):
     return local_part.lower(), domain.lower(), folder.lower()
 
 
-def select_ids(logs, allowed_senders, subject_pattern, cutoff_str=None):
+def select_ids(logs, allowed_senders, subject_pattern, cutoff_str=None, verbose=False):
     """Escanea los logs de Exim y selecciona los IDs que coinciden con los filtros, analizando estados de entrega."""
     raw_messages = {}
     source_ips = {}
@@ -208,9 +206,9 @@ def select_ids(logs, allowed_senders, subject_pattern, cutoff_str=None):
     subject_re = re.compile(subject_pattern, re.I)
 
     for fp in logs:
-        print(f'[LOG] Analizando {fp}...', flush=True)
+        if verbose:
+            print(f'[LOG] Analizando {fp}...', flush=True)
         for line in read_log(fp):
-            # Filtro rápido de fecha si el log tiene formato estándar YYYY-MM-DD
             if cutoff_str and len(line) >= 10 and line[:4].isdigit():
                 if line[:10] < cutoff_str:
                     continue
@@ -279,7 +277,6 @@ def select_ids(logs, allowed_senders, subject_pattern, cutoff_str=None):
                 elif flag == '==':
                     delivery_status[eid] = ('DIFERIDO_COLA', rest[:50])
 
-    # 3. Consolidación de IDs padre / hijo (evitar duplicar la misma llegada y su reinyección spam-scanner)
     messages = {}
     parent_ids = {info['parent_id'] for info in raw_messages.values() if info.get('parent_id')}
 
@@ -350,7 +347,6 @@ def find_message_file_targeted(info, eid, userdomains, userhomes):
     if user and user in userhomes:
         candidate_homes.append(userhomes[user])
 
-    # Fallback si no está en userdomains
     if not candidate_homes:
         for p in glob.glob(f'/home*/mail/{domain}') + glob.glob(f'/home*/*/mail/{domain}'):
             candidate_homes.append(os.path.dirname(os.path.dirname(p)))
@@ -363,7 +359,6 @@ def find_message_file_targeted(info, eid, userdomains, userhomes):
         if not os.path.isdir(mbox_base):
             continue
 
-        # Subcarpetas estándar de Maildir (Inbox, spam, Junk, Trash, etc.)
         subfolders = ['', '.spam', '.Junk', '.Spam', '.Trash', '.INBOX.spam', '.INBOX.junk']
         for sub in subfolders:
             fpath = os.path.join(mbox_base, sub) if sub else mbox_base
@@ -392,7 +387,7 @@ def find_message_file_targeted(info, eid, userdomains, userhomes):
     return None
 
 
-def maildir_files(base_dirs, cutoff_ts, progress):
+def maildir_files(base_dirs, cutoff_ts, progress, verbose=False):
     """Genera rutas de archivos en Maildir recientes en cur/, new/ y subcarpetas."""
     scanned = 0
     for base in base_dirs:
@@ -412,13 +407,11 @@ def maildir_files(base_dirs, cutoff_ts, progress):
                 except (OSError, ValueError):
                     continue
                 scanned += 1
-                if scanned % progress == 0:
+                if verbose and scanned % progress == 0:
                     print(f'[PROGRESO] {scanned:,} archivos revisados en buzones...', flush=True)
                 yield path
 
             dirs.clear()
-
-    print(f'[PROGRESO] Terminado recorrido Maildir: {scanned:,} archivos recientes evaluados', flush=True)
 
 
 def parse_extracted_rows(info, exim_id, raw, path):
@@ -452,17 +445,18 @@ def parse_extracted_rows(info, exim_id, raw, path):
 
 def main():
     ap = argparse.ArgumentParser(
-        description='Extrae enlaces y dominios de mensajes de phishing recibidos en Exim/Maildir (solo lectura).'
+        description='Extrae dominios afectados y enlaces de phishing recibidos en Exim/Maildir (solo lectura).'
     )
-    ap.add_argument('--days', type=int, default=5, help='Antigüedad máxima en días para analizar buzones y logs (por defecto: 5)')
+    ap.add_argument('--days', type=int, default=5, help='Antigüedad máxima en días para analizar (por defecto: 5)')
     ap.add_argument('--subject', default=DEFAULT_SUBJECT_RE, help='Expresión regular para filtrar por asunto del correo')
-    ap.add_argument('--sender-domain', action='append', help='Filtrar por dominio del remitente (se puede repetir: --sender-domain d1.com --sender-domain d2.com)')
-    ap.add_argument('--all-senders', action='store_true', default=False, help='Evaluar todos los remitentes sin filtrar por dominio (activo por defecto si no se especifica --sender-domain)')
-    ap.add_argument('--csv', action='store_true', help='Exportar resultados a archivos CSV (por defecto: desactivado, solo muestra en terminal)')
-    ap.add_argument('--out', default=None, help='Prefijo para los archivos CSV de salida (activa automáticamente --csv)')
-    ap.add_argument('--eml', help='Modo de prueba local: analiza un archivo .eml individual sin revisar logs ni buzones')
-    ap.add_argument('--progress', type=int, default=2000, help='Frecuencia de notificación de progreso de archivos revisados (por defecto: 2000)')
-    ap.add_argument('--queue-limit', type=int, default=200, help='Máximo de mensajes en cola de Exim a consultar con exim -Mvb')
+    ap.add_argument('--sender-domain', action='append', help='Filtrar por dominio del remitente')
+    ap.add_argument('--all-senders', action='store_true', default=False, help='Evaluar todos los remitentes sin filtrar')
+    ap.add_argument('--verbose', action='store_true', help='Mostrar progreso detallado de lectura de logs y buzones')
+    ap.add_argument('--csv', action='store_true', help='Exportar resultados a archivos CSV')
+    ap.add_argument('--out', default=None, help='Prefijo para los archivos CSV de salida (activa --csv)')
+    ap.add_argument('--eml', help='Modo de prueba local con archivo .eml individual')
+    ap.add_argument('--progress', type=int, default=2000, help='Frecuencia de notificación en modo verbose')
+    ap.add_argument('--queue-limit', type=int, default=200, help='Máximo de mensajes en cola a consultar')
     args = ap.parse_args()
 
     if args.days < 1 or args.progress < 1:
@@ -478,23 +472,6 @@ def main():
     matches = {}
     all_extracted_rows = []
 
-    print('=' * 75)
-    print('  AUDITORÍA DE ENLACES PHISHING EN EXIM (Solo Lectura)')
-    print('=' * 75)
-    print(f'[*] Filtro de Asunto: {args.subject}')
-    if args.sender_domain:
-        allowed_senders = {s.lower().lstrip('@') for s in args.sender_domain}
-        print(f'[*] Filtro de Remitentes: {", ".join(allowed_senders)}')
-    else:
-        allowed_senders = set()
-        print('[*] Filtro de Remitentes: Todos los dominios')
-    print(f'[*] Antigüedad: Últimos {args.days} días')
-    if export_csv:
-        print(f'[*] Salida CSV: {args.out}_detalle.csv')
-    else:
-        print('[*] Modo: Salida directa en terminal (sin generar archivos en disco)')
-    print('-' * 75, flush=True)
-
     if args.eml:
         try:
             raw = Path(args.eml).read_bytes()
@@ -505,7 +482,6 @@ def main():
         ids = EXIM_RE.findall(raw.decode('latin1', errors='replace').split('\n\n', 1)[0])
         eid = ids[-1] if ids else 'EML_TEST'
         messages = {eid: {'sender': '', 'recipient': '', 'subject': '', 'source_ip': '', 'delivery_status': ('EML', 'prueba local')}}
-        raw_messages = messages
         delivery_stats = Counter({'EML': 1})
         matches[eid] = (raw, args.eml)
     else:
@@ -527,36 +503,15 @@ def main():
         cutoff_str = cutoff_date.strftime('%Y-%m-%d')
         cutoff_ts = (dt.datetime.now() - dt.timedelta(days=args.days + 1)).timestamp()
 
-        messages, raw_messages, delivery_stats = select_ids(logs, allowed_senders, args.subject, cutoff_str)
-        print(f'[INFO] Eventos en logs: {len(raw_messages):,} | Correos únicos consolidados: {len(messages):,}', flush=True)
-
-        print('\n[ANÁLISIS DE ENTREGAS EN LOGS]:')
-        delivered_local = delivery_stats.get("ENTREGADO_BUZON", 0)
-        rejected_user = delivery_stats.get("RECHAZADO", 0)
-        discarded_filter = delivery_stats.get("DESCARTADO_FILTRO", 0)
-        deferred_queue = delivery_stats.get("DIFERIDO_COLA", 0)
-
-        print(f'  - Entregados a buzones locales (=>): {delivered_local:,}')
-        print(f'  - Rechazados por destinatario inválido (**): {rejected_user:,}')
-        print(f'  - Descartados a /dev/null o blackhole (=>): {discarded_filter:,}')
-        if deferred_queue:
-            print(f'  - Diferidos o en cola (==): {deferred_queue:,}')
-
-        rcpt_counter = Counter()
-        for info in messages.values():
-            r = info.get('delivery_rcpt') or info.get('recipient')
-            if r:
-                rcpt_counter[r.lower().strip('<>')] += 1
-
-        if rcpt_counter:
-            print('\n[TOP DESTINATARIOS EN LOGS]:')
-            for rcpt, count in rcpt_counter.most_common(10):
-                print(f'  {count:>4}  {rcpt}')
-
-        print('-' * 75, flush=True)
+        allowed_senders = {s.lower().lstrip('@') for s in args.sender_domain} if args.sender_domain else set()
+        messages, raw_messages, delivery_stats = select_ids(logs, allowed_senders, args.subject, cutoff_str, args.verbose)
 
         if not messages:
-            print('[INFO] No se encontraron mensajes coincidentes con los filtros especificados.')
+            print('=' * 75)
+            print('  AUDITORÍA DE PHISHING EN EXIM')
+            print('=' * 75)
+            print(f'[*] No se detectaron correos coincidentes en los últimos {args.days} días.')
+            print('=' * 75)
             return 0
 
         # 1. Cola de Exim
@@ -577,34 +532,25 @@ def main():
             except (OSError, subprocess.TimeoutExpired, FileNotFoundError):
                 continue
 
-        print(f'[COLA] Mensajes recuperados de la cola de Exim: {len(matches):,} (consultados: {checked_queue:,})', flush=True)
-
-        # 2. Búsqueda Dirigida por Buzón Específico
+        # 2. Búsqueda Dirigida en Buzones
         userdomains = load_userdomains()
         userhomes = load_userhomes()
 
         pending_eids = [eid for eid in messages if eid not in matches and messages[eid]['delivery_status'][0] == 'ENTREGADO_BUZON']
-        print(f'[MAILDIR-DIRIGIDO] Buscando directamente en los buzones de los {len(pending_eids):,} correos entregados...', flush=True)
-        targeted_found = 0
         for eid in pending_eids:
             fpath = find_message_file_targeted(messages[eid], eid, userdomains, userhomes)
             if fpath:
                 try:
                     raw = Path(fpath).read_bytes()
                     matches[eid] = (raw, fpath)
-                    targeted_found += 1
                 except OSError:
                     pass
-
-        print(f'[MAILDIR-DIRIGIDO] Mensajes recuperados en sus buzones: {targeted_found:,}/{len(pending_eids):,}', flush=True)
 
         # 3. Barrido General en Maildirs (fallback)
         target_eids = set(messages.keys()) - set(matches.keys())
         if target_eids:
             mail_bases = find_mail_dirs()
             if mail_bases:
-                print(f'[MAILDIR-GENERAL] Analizando {len(mail_bases)} directorios de correo para los {len(target_eids):,} pendientes...', flush=True)
-
                 id_to_main_eid = {}
                 msgid_to_main_eid = {}
                 for eid in target_eids:
@@ -615,7 +561,7 @@ def main():
                     if info.get('msg_id'):
                         msgid_to_main_eid[info['msg_id']] = eid
 
-                for path in maildir_files(mail_bases, cutoff_ts, args.progress):
+                for path in maildir_files(mail_bases, cutoff_ts, args.progress, args.verbose):
                     if not target_eids:
                         break
 
@@ -641,16 +587,12 @@ def main():
                         if meid not in matches:
                             matches[meid] = (raw, path)
                             target_eids.discard(meid)
-                            if len(matches) % 25 == 0 or len(matches) == len(messages):
-                                print(f'[COINCIDENCIAS] {len(matches):,}/{len(messages):,} mensajes recuperados', flush=True)
 
-    # 4. Procesar y Decodificar Mensajes
-    print(f'\n[EXTRACCIÓN] Procesando enlaces de {len(matches):,} mensajes físicamente disponibles...', flush=True)
+    # 4. Extracción de enlaces de correos recuperados
     for eid, (raw, path) in matches.items():
         try:
             rows = parse_extracted_rows(messages.get(eid, {}), eid, raw, path)
-        except Exception as exc:
-            print(f'[ADVERTENCIA] Error procesando mensaje {eid}: {exc}', file=sys.stderr)
+        except Exception:
             continue
 
         for r in rows:
@@ -658,27 +600,54 @@ def main():
             counts[r['url']] += 1
             if r['url_host']:
                 hosts[r['url_host']] += 1
-
         found_ids.add(eid)
 
-    # 5. Salida en Terminal (Detalle de cada enlace detectado)
-    if all_extracted_rows:
-        print('\n' + '=' * 75)
-        print('  DETALLE DE ENLACES DE PHISHING RECUPERADOS')
-        print('=' * 75)
-        for i, r in enumerate(all_extracted_rows, 1):
-            print(f'[{i}] ID Exim:      {r["exim_id"]} (IP Origen: {r["source_ip"] or "No registrada"})')
-            print(f'    Destinatario: {r["recipient"]}')
-            print(f'    Remitente:    {r["sender"]}')
-            print(f'    Asunto:       {r["subject"]}')
-            print(f'    Texto Ancla:  {r["anchor_text"]} [Acción: {r["action_link"]}]')
-            print(f'    URL Phishing: \033[1;31m{r["url"]}\033[0m')
-            print(f'    Archivo Mail: {r["mail_file"]}')
-            print('-' * 75)
-    else:
-        print('\n[*] No se recuperaron correos físicos en disco para extraer enlaces.')
+    # 5. Agrupación de dominios alojados afectados
+    domain_counter = Counter()
+    for info in messages.values():
+        rcpt = info.get('delivery_rcpt') or info.get('recipient') or ''
+        _, domain, _ = parse_recipient(rcpt)
+        if domain:
+            domain_counter[domain] += 1
 
-    # 6. Exportar CSV opcional
+    # ==========================
+    # SALIDA FINAL LIMPIA
+    # ==========================
+    total_emails = len(messages)
+    total_domains = len(domain_counter)
+
+    print('=' * 75)
+    print(f'  DOMINIOS ALOJADOS AFECTADOS ({total_emails:,} correos dirigidos a {total_domains:,} dominios)')
+    print('=' * 75)
+    for dom, count in domain_counter.most_common():
+        print(f'  • {dom:<40} ({count:>3} correos recibidos)')
+
+    print('\n' + '=' * 75)
+    print('  ENLACES Y DOMINIOS DE PHISHING')
+    print('=' * 75)
+    if counts:
+        print('DOMINIOS DE PHISHING DETECTADOS:')
+        for host, n in hosts.most_common():
+            print(f'  • {host:<40} ({n} apariciones)')
+
+        print('\nENLACES (URLs):')
+        for url, n in counts.most_common():
+            print(f'  • {url}')
+
+        print('\nDETALLE DE CORREOS RECUPERADOS:')
+        for i, r in enumerate(all_extracted_rows, 1):
+            print(f'  [{i}] Destinatario: {r["recipient"]}')
+            print(f'      Asunto:       {r["subject"]}')
+            print(f'      Texto Enlace: {r["anchor_text"]} [Acción: {r["action_link"]}]')
+            print(f'      URL:          {r["url"]}')
+            print(f'      Archivo:      {r["mail_file"]}')
+            if i < len(all_extracted_rows):
+                print('      ' + '-' * 60)
+    else:
+        print('[!] Los archivos de los correos ya no se encuentran en los buzones del servidor')
+        print('    (fueron descargados por POP3, eliminados por el usuario o purgados por antispam).')
+    print('=' * 75)
+
     if export_csv and all_extracted_rows:
         prefix = Path(args.out)
         try:
@@ -705,30 +674,9 @@ def main():
                 for host, count in hosts.most_common():
                     w.writerow([count, host])
 
-            print(f'[✓] CSV Detalle:  {details_csv}')
-            print(f'[✓] CSV URLs:     {urls_csv}')
-            print(f'[✓] CSV Dominios: {doms_csv}')
-        except Exception as exc:
-            print(f'[ADVERTENCIA] No se pudieron escribir los CSV: {exc}', file=sys.stderr)
-
-    delivered_count = delivery_stats.get('ENTREGADO_BUZON', len(matches))
-    print('\n' + '=' * 75)
-    print(f'  RESUMEN: {len(found_ids):,}/{delivered_count:,} correos entregados recuperados | {len(counts):,} URLs | {len(hosts):,} Dominios')
-    print('=' * 75)
-    print('DOMINIOS DE PHISHING IDENTIFICADOS:')
-    if hosts:
-        for host, n in hosts.most_common(20):
-            print(f'  {n:>6} apariciones:  {host}')
-    else:
-        print('  (Ningún dominio extraído de buzones físicos)')
-    print('=' * 75)
-
-    if delivered_count > len(found_ids):
-        diff = delivered_count - len(found_ids)
-        print(f'\n[NOTA FORENSE] {diff:,} correos fueron registrados como entregados por Exim pero ya no están')
-        print('  en el servidor. Causas habituales: descarga por POP3, eliminación por el usuario vía Webmail/IMAP,')
-        print('  o purga automática de buzones de Spam por políticas de cPanel.')
-        print('=' * 75)
+            print(f'\n[✓] Reportes CSV exportados en: {details_csv}')
+        except Exception:
+            pass
 
     return 0
 
