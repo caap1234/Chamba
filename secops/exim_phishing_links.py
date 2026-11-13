@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Auditoría local y de solo lectura de enlaces (phishing/malware) en correos procesados por Exim (cPanel y DirectAdmin).
 
-Extrae dominios alojados afectados y URLs de phishing cruzando /var/log/exim_mainlog con buzones Maildir.
-Por defecto opera 100% en memoria con salida limpia y directa en terminal.
+Extrae dominios y URLs de phishing cruzando /var/log/exim_mainlog con buzones Maildir.
+Por defecto opera 100% en memoria con salida minimalista directa en terminal.
 
 Ejecución directa One-Liner en terminal:
-  python3 <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/secops/exim_phishing_links.py)
+  python3 <(wget -qO- "https://raw.githubusercontent.com/caap1234/Chamba/main/secops/exim_phishing_links.py?$(date +%s)")
   o
-  python3 <(curl -sL https://caap1234.github.io/tools/scripts/exim_phishing_links.py)
+  python3 <(curl -sL "https://caap1234.github.io/tools/scripts/exim_phishing_links.py?$(date +%s)")
 """
 import argparse
 import csv
@@ -445,13 +445,13 @@ def parse_extracted_rows(info, exim_id, raw, path):
 
 def main():
     ap = argparse.ArgumentParser(
-        description='Extrae dominios afectados y enlaces de phishing recibidos en Exim/Maildir (solo lectura).'
+        description='Extrae dominios y enlaces de phishing recibidos en Exim/Maildir (solo lectura).'
     )
     ap.add_argument('--days', type=int, default=5, help='Antigüedad máxima en días para analizar (por defecto: 5)')
     ap.add_argument('--subject', default=DEFAULT_SUBJECT_RE, help='Expresión regular para filtrar por asunto del correo')
     ap.add_argument('--sender-domain', action='append', help='Filtrar por dominio del remitente')
     ap.add_argument('--all-senders', action='store_true', default=False, help='Evaluar todos los remitentes sin filtrar')
-    ap.add_argument('--verbose', action='store_true', help='Mostrar progreso detallado de lectura de logs y buzones')
+    ap.add_argument('--verbose', action='store_true', help='Mostrar progreso detallado y lista completa de dominios alojados')
     ap.add_argument('--csv', action='store_true', help='Exportar resultados a archivos CSV')
     ap.add_argument('--out', default=None, help='Prefijo para los archivos CSV de salida (activa --csv)')
     ap.add_argument('--eml', help='Modo de prueba local con archivo .eml individual')
@@ -468,7 +468,6 @@ def main():
 
     counts = Counter()
     hosts = Counter()
-    found_ids = set()
     matches = {}
     all_extracted_rows = []
 
@@ -482,7 +481,6 @@ def main():
         ids = EXIM_RE.findall(raw.decode('latin1', errors='replace').split('\n\n', 1)[0])
         eid = ids[-1] if ids else 'EML_TEST'
         messages = {eid: {'sender': '', 'recipient': '', 'subject': '', 'source_ip': '', 'delivery_status': ('EML', 'prueba local')}}
-        delivery_stats = Counter({'EML': 1})
         matches[eid] = (raw, args.eml)
     else:
         log_patterns = [
@@ -508,9 +506,9 @@ def main():
 
         if not messages:
             print('=' * 75)
-            print('  AUDITORÍA DE PHISHING EN EXIM')
+            print('  DOMINIOS Y ENLACES DE PHISHING')
             print('=' * 75)
-            print(f'[*] No se detectaron correos coincidentes en los últimos {args.days} días.')
+            print(f'[*] No se detectaron correos sospechosos en los últimos {args.days} días.')
             print('=' * 75)
             return 0
 
@@ -600,49 +598,21 @@ def main():
             counts[r['url']] += 1
             if r['url_host']:
                 hosts[r['url_host']] += 1
-        found_ids.add(eid)
-
-    # 5. Agrupación de dominios alojados afectados
-    domain_counter = Counter()
-    for info in messages.values():
-        rcpt = info.get('delivery_rcpt') or info.get('recipient') or ''
-        _, domain, _ = parse_recipient(rcpt)
-        if domain:
-            domain_counter[domain] += 1
 
     # ==========================
-    # SALIDA FINAL LIMPIA
+    # SALIDA FINAL CONCISA
     # ==========================
-    total_emails = len(messages)
-    total_domains = len(domain_counter)
-
     print('=' * 75)
-    print(f'  DOMINIOS ALOJADOS AFECTADOS ({total_emails:,} correos dirigidos a {total_domains:,} dominios)')
-    print('=' * 75)
-    for dom, count in domain_counter.most_common():
-        print(f'  • {dom:<40} ({count:>3} correos recibidos)')
-
-    print('\n' + '=' * 75)
-    print('  ENLACES Y DOMINIOS DE PHISHING')
+    print('  ENLACES Y DOMINIOS DE PHISHING DETECTADOS')
     print('=' * 75)
     if counts:
-        print('DOMINIOS DE PHISHING DETECTADOS:')
+        print('DOMINIOS DE PHISHING:')
         for host, n in hosts.most_common():
-            print(f'  • {host:<40} ({n} apariciones)')
+            print(f'  • {host} ({n} apariciones)')
 
         print('\nENLACES (URLs):')
         for url, n in counts.most_common():
             print(f'  • {url}')
-
-        print('\nDETALLE DE CORREOS RECUPERADOS:')
-        for i, r in enumerate(all_extracted_rows, 1):
-            print(f'  [{i}] Destinatario: {r["recipient"]}')
-            print(f'      Asunto:       {r["subject"]}')
-            print(f'      Texto Enlace: {r["anchor_text"]} [Acción: {r["action_link"]}]')
-            print(f'      URL:          {r["url"]}')
-            print(f'      Archivo:      {r["mail_file"]}')
-            if i < len(all_extracted_rows):
-                print('      ' + '-' * 60)
     else:
         print('[!] Los archivos de los correos ya no se encuentran en los buzones del servidor')
         print('    (fueron descargados por POP3, eliminados por el usuario o purgados por antispam).')
