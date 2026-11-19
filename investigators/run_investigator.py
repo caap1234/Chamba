@@ -1,4 +1,5 @@
-#!/usr/bin/env python
+#!/bin/sh
+''''exec "$(command -v python3 || command -v python || /usr/local/cpanel/3rdparty/bin/python3 || echo python)" "$0" "$@" # '''
 # -*- coding: utf-8 -*-
 from __future__ import print_function, absolute_import, division
 """

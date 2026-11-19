@@ -25,13 +25,32 @@ Todos los scripts están desarrollados en Python estándar sin dependencias de t
 
 ## 🚀 Menú Interactivo Global
 
-Puedes ejecutar el menú principal que te permite seleccionar cualquiera de las 10 herramientas con un menú numérico:
+Todos los scripts son compatibles tanto con **Python 3** como con **Python 2.7.5** (CentOS 7 / CloudLinux 7).
+
+### Ejecución directa en cualquier servidor (sin clonar el repositorio)
+
+Puedes usar el lanzador universal en Bash (detecta automáticamente si el servidor usa `python3` o `python`):
 
 ```bash
-python3 run_investigator.py
+# Menú interactivo global:
+bash <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/run.sh)
+
+# O pasando argumentos a una herramienta directamente:
+bash <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/run.sh) 01 --server cpanel --email cajatapachula@cristasur.com.mx
 ```
 
-O dar permisos de ejecución y correr cualquier script individualmente.
+O invocando directamente el intérprete de Python:
+
+```bash
+# En servidores con Python 3:
+python3 <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/run_investigator.py)
+
+# En servidores antiguos con Python 2.7.5 (CentOS 7 / CloudLinux 7 donde no existe python3):
+python <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/run_investigator.py)
+
+# O de forma universal automática en una sola línea:
+$(command -v python3 || command -v python) <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/run_investigator.py)
+```
 
 ---
 
