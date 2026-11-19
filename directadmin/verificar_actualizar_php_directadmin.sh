@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Script: verificar_actualizar_php_directadmin.sh
-# Proposito: Auditoria y compilacion/actualizacion de seguridad de PHP en DirectAdmin
-#            utilizando CustomBuild (ramas 8.1 en adelante, 8.2-8.5 y 7.4/8.0).
-# Boletin de Seguridad: 18 de Noviembre de 2026
-# CVEs: CVE-2026-129289 (PHP-FPM Request Smuggling RCE), CVE-2026-126714, CVE-2026-115560
+# Proposito: Auditoria y compilacion/actualizacion de seguridad en DirectAdmin:
+#            1. PHP via CustomBuild (ramas 8.1 en adelante, 8.2-8.5 y 7.4/8.0)
+#            2. Apache HTTP Server (>= 2.4.71 - mod_http2 CVE-2026-119618 RCE)
+# Boletines de Seguridad:
+#  - PHP: 18 de Noviembre de 2026 (CVE-2026-129289, CVE-2026-126714, CVE-2026-115560)
+#  - Apache: CVE-2026-119618 (mod_http2 RCE corregido en Apache >= 2.4.71)
 # Compatibilidad: CentOS 7, AlmaLinux, Rocky Linux, RHEL, Debian, Ubuntu
 #                 (con python3, python2.7, python o utilidades del sistema)
 # ==============================================================================
@@ -49,6 +51,11 @@ printf 'Inicio: %s | Log: %s\n' "$(date -Is 2>/dev/null || date '+%Y-%m-%d %H:%M
 # Versiones minimas oficiales corregidas tras el lanzamiento de seguridad del 18 de Noviembre de 2026
 declare -A MIN=( ["8.2"]="8.2.36" ["8.3"]="8.3.37" ["8.4"]="8.4.28" ["8.5"]="8.5.13" )
 declare -A BACKPORT=( ["7.4"]="Parche de CustomBuild" ["8.0"]="Parche de CustomBuild" ["8.1"]="Parche de CustomBuild (Nov 18, 2026)" )
+
+APACHE_MIN="2.4.71"
+apache_installed=0
+apache_needs=0
+apache_v=""
 
 branches=() needs=0 failed=0
 
@@ -126,6 +133,34 @@ is_da_backported() {
 }
 
 echo '===== ESTADO INICIAL ====='
+
+# 1. Auditoria de Apache HTTP Server (CVE-2026-119618 mod_http2)
+httpd_bin=""
+if [[ -x /usr/sbin/httpd ]]; then
+  httpd_bin="/usr/sbin/httpd"
+elif command -v httpd >/dev/null 2>&1; then
+  httpd_bin=$(command -v httpd)
+fi
+
+webserver=$(sed -n "s/^webserver=//p" "$CONF" | tail -n1 | tr -d '\r')
+
+if [[ -n "$httpd_bin" ]] || [[ "$webserver" =~ ^(apache|nginx_apache)$ ]]; then
+  apache_installed=1
+  if [[ -n "$httpd_bin" && -x "$httpd_bin" ]]; then
+    apache_v=$("$httpd_bin" -v 2>/dev/null | sed -n 's/.*Apache\/\([0-9.]*\).*/\1/p' | head -n1)
+  fi
+
+  if [[ -n "$apache_v" ]] && meets "$apache_v" "$APACHE_MIN"; then
+    echo "Apache (HTTPD): $apache_v - CUMPLE (>= $APACHE_MIN - mod_http2 CVE-2026-119618 corregido)"
+  else
+    echo "Apache (HTTPD): ${apache_v:-NO DISPONIBLE} - ACTUALIZACION REQUERIDA (Requiere >= $APACHE_MIN para corregir mod_http2 CVE-2026-119618)"
+    apache_needs=1
+  fi
+else
+  echo "Servidor Web: ${webserver:-desconocido} (no es Apache, omitido)"
+fi
+
+# 2. Auditoria de ramas PHP en CustomBuild
 for slot in 1 2 3 4; do
   branch=$(sed -n "s/^php${slot}_release=//p" "$CONF" | tail -n1 | tr -d '\r')
   [[ -z "$branch" || "$branch" == no ]] && continue
@@ -157,7 +192,7 @@ if (( ${#branches[@]} == 0 )); then
   exit 2
 fi
 
-if (( needs || FORCE == 1 )); then
+if (( needs || apache_needs || FORCE == 1 )); then
   if (( FORCE == 1 )); then
     echo '===== MODO FORZADO (--force): Recompilando CustomBuild independientemente del estado actual ====='
   fi
@@ -166,23 +201,57 @@ if (( needs || FORCE == 1 )); then
   run_cb clean >/dev/null 2>&1 || true
 
   if run_cb update; then
-    echo '===== RECOMPILANDO PHP CON CUSTOMBUILD (aplicando versiones y parches) ====='
-    if ! run_cb php; then
-      echo 'ERROR: CustomBuild reporto un fallo al compilar PHP.'
-      failed=1
-    else
-      echo '===== REESCRIBIENDO CONFIGURACIONES Y REINICIANDO SERVICIOS ====='
-      run_cb rewrite_confs >/dev/null 2>&1 || true
+    if (( needs || FORCE == 1 )); then
+      echo '===== RECOMPILANDO PHP CON CUSTOMBUILD (aplicando versiones y parches) ====='
+      if ! run_cb php; then
+        echo 'ERROR: CustomBuild reporto un fallo al compilar PHP.'
+        failed=1
+      fi
     fi
+
+    if (( apache_needs || FORCE == 1 )) && (( apache_installed == 1 )); then
+      echo '===== RECOMPILANDO APACHE CON CUSTOMBUILD (actualizando a >= 2.4.71 mod_http2) ====='
+      if ! run_cb apache; then
+        echo 'ERROR: CustomBuild reporto un fallo al compilar Apache.'
+        failed=1
+      fi
+    fi
+
+    echo '===== REESCRIBIENDO CONFIGURACIONES Y REINICIANDO SERVICIOS ====='
+    run_cb rewrite_confs >/dev/null 2>&1 || true
   else
     echo 'ERROR: No se pudo actualizar metadatos de CustomBuild (./build update).'
     failed=1
   fi
 else
-  echo 'Todas las ramas evaluadas cumplen con los parches de seguridad (November 18, 2026); no se recompila PHP.'
+  echo 'Todos los componentes evaluados (PHP y Apache) cumplen con los parches de seguridad; no se recompila nada.'
 fi
 
 echo '===== VALIDACION FINAL ====='
+
+# Validacion final de Apache HTTP Server
+if (( apache_installed )); then
+  final_httpd_bin=""
+  if [[ -x /usr/sbin/httpd ]]; then
+    final_httpd_bin="/usr/sbin/httpd"
+  elif command -v httpd >/dev/null 2>&1; then
+    final_httpd_bin=$(command -v httpd)
+  fi
+
+  apache_final_v=""
+  if [[ -n "$final_httpd_bin" && -x "$final_httpd_bin" ]]; then
+    apache_final_v=$("$final_httpd_bin" -v 2>/dev/null | sed -n 's/.*Apache\/\([0-9.]*\).*/\1/p' | head -n1)
+  fi
+
+  if [[ -n "$apache_final_v" ]] && meets "$apache_final_v" "$APACHE_MIN"; then
+    echo "OK Apache (HTTPD): $apache_final_v >= $APACHE_MIN - CUMPLE (mod_http2 CVE-2026-119618 corregido)"
+  else
+    echo "FALLO Apache (HTTPD): ${apache_final_v:-NO DISPONIBLE} < $APACHE_MIN (Vulnerable a CVE-2026-119618 en mod_http2)"
+    failed=1
+  fi
+fi
+
+# Validacion final de ramas PHP
 for branch in "${branches[@]}"; do
   v=$(version_of "$branch") || v='NO DISPONIBLE'
   if [[ -n "${BACKPORT[$branch]:-}" ]]; then
