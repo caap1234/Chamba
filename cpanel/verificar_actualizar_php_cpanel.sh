@@ -70,7 +70,11 @@ meets() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" == "$2" ]]; }
 has_pkg_update() {
   local b="$1"
   local code=0
-  $PKG_MGR check-update -q "ea-php${b}*" >/dev/null 2>&1 || code=$?
+  if [[ "$PKG_MGR" == "yum" ]]; then
+    yum check-update -q --setopt=*.skip_if_unavailable=1 "ea-php${b}*" >/dev/null 2>&1 || code=$?
+  else
+    $PKG_MGR check-update -q "ea-php${b}*" >/dev/null 2>&1 || code=$?
+  fi
   if (( code == 100 )); then
     return 0 # Hay actualizacion pendiente en los repositorios
   fi
@@ -79,7 +83,11 @@ has_pkg_update() {
 
 has_apache_update() {
   local code=0
-  $PKG_MGR check-update -q "ea-apache24*" >/dev/null 2>&1 || code=$?
+  if [[ "$PKG_MGR" == "yum" ]]; then
+    yum check-update -q --setopt=*.skip_if_unavailable=1 "ea-apache24*" >/dev/null 2>&1 || code=$?
+  else
+    $PKG_MGR check-update -q "ea-apache24*" >/dev/null 2>&1 || code=$?
+  fi
   if (( code == 100 )); then
     return 0 # Hay actualizacion pendiente
   fi
@@ -190,8 +198,12 @@ if (( ${#needs[@]} > 0 || apache_needs_update == 1 || FORCE == 1 )); then
   fi
 
   echo "===== 1. LIMPIANDO Y ACTUALIZANDO CACHE DE REPOSITORIOS ($PKG_MGR clean all / makecache) ====="
-  $PKG_MGR clean all
-  $PKG_MGR makecache
+  $PKG_MGR clean all || true
+  if [[ "$PKG_MGR" == "yum" ]]; then
+    yum makecache --setopt=*.skip_if_unavailable=1 2>/dev/null || true
+  else
+    $PKG_MGR makecache 2>/dev/null || true
+  fi
 
   echo "===== 2. ACTUALIZANDO PAQUETES CON /scripts/update-packages ====="
   if [[ -x /scripts/update-packages ]]; then
@@ -223,14 +235,20 @@ if (( ${#needs[@]} > 0 || apache_needs_update == 1 || FORCE == 1 )); then
     if [[ "$PKG_MGR" == "dnf" ]]; then
       if dnf upgrade -y --refresh "${patterns[@]}"; then
         update_ok=1
+      elif dnf upgrade -y --skip-broken "${patterns[@]}"; then
+        echo "AVISO: dnf requirio --skip-broken para resolver dependencias."
+        update_ok=1
       fi
     else
       # yum en CentOS 7 / CloudLinux 7
       yum clean expire-cache >/dev/null 2>&1 || true
-      if yum update -y "${patterns[@]}"; then
+      if yum update -y --setopt=*.skip_if_unavailable=1 "${patterns[@]}"; then
         update_ok=1
-      elif yum update -y --skip-broken "${patterns[@]}"; then
+      elif yum update -y --setopt=*.skip_if_unavailable=1 --skip-broken "${patterns[@]}"; then
         echo "AVISO: La actualizacion requirio --skip-broken para resolver dependencias rotas en repositorios."
+        update_ok=1
+      elif yum update -y --disablerepo=updates,base,extras --skip-broken "${patterns[@]}"; then
+        echo "AVISO: Se desactivaron repositorios EOL de CentOS (updates, base, extras) para completar la actualizacion de EA4."
         update_ok=1
       fi
     fi
