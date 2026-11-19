@@ -180,11 +180,13 @@ legacy=$(rpm -qa --qf '%{NAME}\n' | grep -E '^ea-php(5[0-9]|7[0-3])-php-cli$' ||
 if (( ${#needs[@]} > 0 || apache_needs_update == 1 || FORCE == 1 )); then
   if (( FORCE == 1 )); then
     echo "===== MODO FORZADO (--force): Ejecutando ciclo completo de actualizacion ====="
-    for b in "${installed[@]}"; do
-      if [[ ! " ${needs[*]:-} " =~ " ${b} " ]]; then
-        needs+=("$b")
-      fi
-    done
+    if (( ${#installed[@]} > 0 )); then
+      for b in "${installed[@]}"; do
+        if [[ ! " ${needs[*]:-} " =~ " ${b} " ]]; then
+          needs+=("$b")
+        fi
+      done
+    fi
   fi
 
   echo "===== 1. LIMPIANDO Y ACTUALIZANDO CACHE DE REPOSITORIOS ($PKG_MGR clean all / makecache) ====="
@@ -193,7 +195,7 @@ if (( ${#needs[@]} > 0 || apache_needs_update == 1 || FORCE == 1 )); then
 
   echo "===== 2. ACTUALIZANDO PAQUETES CON /scripts/update-packages ====="
   if [[ -x /scripts/update-packages ]]; then
-    /scripts/update-packages
+    /scripts/update-packages || true
   else
     echo "AVISO: /scripts/update-packages no encontrado. Procediendo con el gestor de paquetes."
   fi
@@ -207,7 +209,9 @@ if (( ${#needs[@]} > 0 || apache_needs_update == 1 || FORCE == 1 )); then
 
   # Actualizacion focalizada con el gestor de paquetes si hay paquetes especificos
   patterns=()
-  for b in "${needs[@]}"; do patterns+=("ea-php${b}*"); done
+  if (( ${#needs[@]} > 0 )); then
+    for b in "${needs[@]}"; do patterns+=("ea-php${b}*"); done
+  fi
   if (( apache_needs_update == 1 || FORCE == 1 )) && (( apache_installed == 1 )); then
     patterns+=("ea-apache24*")
   fi
@@ -224,6 +228,9 @@ if (( ${#needs[@]} > 0 || apache_needs_update == 1 || FORCE == 1 )); then
       # yum en CentOS 7 / CloudLinux 7
       yum clean expire-cache >/dev/null 2>&1 || true
       if yum update -y "${patterns[@]}"; then
+        update_ok=1
+      elif yum update -y --skip-broken "${patterns[@]}"; then
+        echo "AVISO: La actualizacion requirio --skip-broken para resolver dependencias rotas en repositorios."
         update_ok=1
       fi
     fi
@@ -266,24 +273,26 @@ if (( apache_installed )); then
 fi
 
 # Validacion final de ramas PHP EasyApache 4
-for b in "${installed[@]}"; do
-  v=$(version_of "$b") || v='NO DISPONIBLE'
-  if [[ "$b" =~ ^(74|80|81)$ ]]; then
-    if [[ "$v" != 'NO DISPONIBLE' ]] && is_cpanel_backported "$b"; then
-      echo "OK ea-php$b: $v - CUMPLE (${BACKPORT_DESC[$b]})"
+if (( ${#installed[@]} > 0 )); then
+  for b in "${installed[@]}"; do
+    v=$(version_of "$b") || v='NO DISPONIBLE'
+    if [[ "$b" =~ ^(74|80|81)$ ]]; then
+      if [[ "$v" != 'NO DISPONIBLE' ]] && is_cpanel_backported "$b"; then
+        echo "OK ea-php$b: $v - CUMPLE (${BACKPORT_DESC[$b]})"
+      else
+        echo "FALLO ea-php$b: $v (Requiere actualizacion backport de cPanel)"
+        failed=1
+      fi
     else
-      echo "FALLO ea-php$b: $v (Requiere actualizacion backport de cPanel)"
-      failed=1
+      if [[ "$v" != 'NO DISPONIBLE' ]] && meets "$v" "${MIN[$b]}"; then
+        echo "OK ea-php$b: $v >= ${MIN[$b]} - CUMPLE (Corregida)"
+      else
+        echo "FALLO ea-php$b: $v < ${MIN[$b]} (o binario no disponible)"
+        failed=1
+      fi
     fi
-  else
-    if [[ "$v" != 'NO DISPONIBLE' ]] && meets "$v" "${MIN[$b]}"; then
-      echo "OK ea-php$b: $v >= ${MIN[$b]} - CUMPLE (Corregida)"
-    else
-      echo "FALLO ea-php$b: $v < ${MIN[$b]} (o binario no disponible)"
-      failed=1
-    fi
-  fi
-done
+  done
+fi
 
 if (( ${#installed[@]} == 0 )); then
   echo 'AVISO: no se encontraron ramas ea-php 7.4 a 8.5 instaladas.'
