@@ -73,7 +73,7 @@ echo "Gestor de Paquetes: $PKG_MGR"
 # ------------------------------------------------------------------------------
 # 2. Funciones de Ayuda y Estándares de Seguridad
 # ------------------------------------------------------------------------------
-declare -A MIN=( ["8.2"]="8.2.35" ["8.3"]="8.3.36" ["8.4"]="8.4.27" ["8.5"]="8.5.12" )
+declare -A MIN=( ["8.2"]="8.2.36" ["8.3"]="8.3.37" ["8.4"]="8.4.28" ["8.5"]="8.5.13" )
 
 meets() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" == "$2" ]]; }
 
@@ -150,13 +150,16 @@ echo "Ramas PHP detectadas: ${DETECTED_BRANCHES[*]}"
 # 4. Evaluación de Estado Inicial y Actualizaciones Pendientes
 # ------------------------------------------------------------------------------
 echo ""
-echo "Sincronizando índices de paquetes del sistema..."
+echo "Sincronizando índices y limpiando caché de paquetes del sistema..."
 if [[ "$FAMILY" == "debian" ]]; then
   export DEBIAN_FRONTEND=noninteractive
+  apt-get clean 2>/dev/null || true
   apt-get update -qq 2>/dev/null || true
 elif [[ "$PKG_MGR" == "dnf" ]]; then
+  dnf clean all 2>/dev/null || true
   dnf makecache --refresh -q 2>/dev/null || true
 elif [[ "$PKG_MGR" == "yum" ]]; then
+  yum clean all 2>/dev/null || true
   yum makecache fast -q 2>/dev/null || true
 fi
 
@@ -252,7 +255,7 @@ if (( ${#needs_branches[@]} )); then
       failed=1
     fi
   elif [[ "$FAMILY" == "redhat" ]]; then
-    local -a upgrade_flags=("-y")
+    upgrade_flags=("-y")
     if [[ "$PKG_MGR" == "dnf" ]]; then
       upgrade_flags+=("--refresh")
     fi
