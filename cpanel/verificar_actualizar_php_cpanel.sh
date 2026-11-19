@@ -145,7 +145,7 @@ echo "cPanel Internal PHP: $(cpanel_internal_php)"
 if rpm -q ea-apache24 >/dev/null 2>&1; then
   apache_installed=1
   apache_current_ver=$(rpm -q --qf '%{VERSION}-%{RELEASE}' ea-apache24 2>/dev/null || echo "")
-  if [[ -n "$apache_current_ver" ]] && meets "$apache_current_ver" "$APACHE_MIN" && ! has_apache_update; then
+  if [[ -n "$apache_current_ver" ]] && meets "${apache_current_ver%%~*}" "$APACHE_MIN" && ! has_apache_update; then
     echo "ea-apache24: $apache_current_ver - CUMPLE (>= $APACHE_MIN - mod_http2 CVE-2026-119618 corregido)"
   else
     echo "ea-apache24: $apache_current_ver - ACTUALIZACION REQUERIDA (Requiere >= $APACHE_MIN para corregir mod_http2 CVE-2026-119618)"
@@ -282,7 +282,7 @@ echo "cPanel Internal PHP final: $(cpanel_internal_php)"
 # Validacion final de Apache HTTP Server
 if (( apache_installed )); then
   apache_final_ver=$(rpm -q --qf '%{VERSION}-%{RELEASE}' ea-apache24 2>/dev/null || echo "")
-  if [[ -n "$apache_final_ver" ]] && meets "$apache_final_ver" "$APACHE_MIN"; then
+  if [[ -n "$apache_final_ver" ]] && meets "${apache_final_ver%%~*}" "$APACHE_MIN"; then
     echo "OK ea-apache24: $apache_final_ver >= $APACHE_MIN - CUMPLE (mod_http2 CVE-2026-119618 corregido)"
   else
     echo "FALLO ea-apache24: $apache_final_ver < $APACHE_MIN (Vulnerable a CVE-2026-119618 en mod_http2)"
