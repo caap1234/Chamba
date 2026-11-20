@@ -197,10 +197,16 @@ if (( needs || apache_needs || FORCE == 1 )); then
     echo '===== MODO FORZADO (--force): Recompilando CustomBuild independientemente del estado actual ====='
   fi
 
-  echo '===== LIMPIANDO Y ACTUALIZANDO METADATOS DE CUSTOMBUILD (clean / update) ====='
+  echo '===== ACTUALIZANDO CUSTOMBUILD Y DEFINICIONES (update_script / update) ====='
   run_cb clean >/dev/null 2>&1 || true
+  run_cb update_script >/dev/null 2>&1 || true
+  if command -v da >/dev/null 2>&1; then
+    da update >/dev/null 2>&1 || true
+  fi
 
   if run_cb update; then
+    echo '--- Versiones disponibles en CustomBuild ---'
+    run_cb versions 2>/dev/null | grep -E -i 'apache|httpd|php' | head -n 20 || true
     if (( needs || FORCE == 1 )); then
       echo '===== RECOMPILANDO PHP CON CUSTOMBUILD (aplicando versiones y parches) ====='
       if ! run_cb php; then
