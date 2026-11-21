@@ -174,12 +174,17 @@ elif [[ -f /etc/redhat-release ]]; then
 elif [[ -f /etc/debian_version ]]; then
   os_display="Debian $(cat /etc/debian_version)"
 fi
+os_display=$(echo "$os_display" | tr -d '"' | tr -d "'" | sed 's/[[:space:]]*$//')
 
 da_version="desconocida"
 if [[ -x /usr/local/directadmin/directadmin ]]; then
-  da_version=$(/usr/local/directadmin/directadmin v 2>/dev/null | awk '{print $NF}' | head -n1 || echo "instalada")
+  da_raw=$(/usr/local/directadmin/directadmin v 2>/dev/null | head -n1 || echo "")
+  da_version=$(echo "$da_raw" | grep -oE '(v\.[0-9.]+|v[0-9.]+|[0-9]+\.[0-9]+(\.[0-9]+)?)' | head -n1 | sed 's/^v\.\?//')
+  if [[ -z "$da_version" ]]; then
+    da_version=$(echo "$da_raw" | awk '{print $1}' || echo "instalada")
+  fi
 elif command -v da >/dev/null 2>&1; then
-  da_version=$(da version 2>/dev/null | head -n1 || echo "instalada")
+  da_version=$(da version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1 || echo "instalada")
 fi
 
 cb_version="CustomBuild 2.0"
