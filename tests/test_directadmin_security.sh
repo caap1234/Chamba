@@ -126,9 +126,11 @@ case "$cmd" in
     if [[ -f "$cb_dir/fail_php_expert" ]]; then
       exit 1
     fi
-    # Por defecto, si compila exitosamente, quita el asterisco en versions_mock_data.txt
+    # Por defecto, si compila exitosamente, quita el asterisco o actualiza version en versions_mock_data.txt
     if [[ -f "$cb_dir/versions_mock_data.txt" ]]; then
       sed -i.bak "s/Installed version of PHP ${target_branch}: .*\*/Installed version of PHP ${target_branch}: ${target_branch}.33/" "$cb_dir/versions_mock_data.txt" 2>/dev/null || true
+      sed -i.bak "s/Installed version of PHP 8.1: 8.1.23/Installed version of PHP 8.1: 8.1.34/" "$cb_dir/versions_mock_data.txt" 2>/dev/null || true
+      sed -i.bak "s/Installed version of PHP 8.2: 8.2.10/Installed version of PHP 8.2: 8.2.36/" "$cb_dir/versions_mock_data.txt" 2>/dev/null || true
     fi
     exit 0
     ;;
@@ -520,6 +522,40 @@ EXIT10=$?
 set -e
 assert_output_contains "Muestra banner de dry-run" "MODO SIMULACION (--dry-run) ACTIVADO" "$OUT10"
 assert_output_not_contains "No compila en dry-run" "[MOCK_CB] Compilando php_expert" "$OUT10"
+
+# --- Escenario 11: Conflicto de iconv en PHP 8.x en CentOS 7 ---
+echo "Test 11: Deteccion y neutralizacion de header iconv.h conflictivo en PHP 8.x"
+ENV11=$(setup_mock_env "test11")
+cat <<'EOF' > "$ENV11/cb/options.conf"
+webserver=apache
+php1_release=8.1
+php1_mode=php-fpm
+EOF
+cat <<'EOF' > "$ENV11/cb/versions_mock_data.txt"
+Latest version of Apache: 2.4.71
+Installed version of PHP 8.1: 8.1.23
+Latest version of PHP 8.1: 8.1.34
+EOF
+create_mock_php_bin "$ENV11" "8.1" "8.1.23"
+create_mock_httpd "$ENV11" "2.4.71" 1
+mkdir -p "$ENV11/local_include"
+touch "$ENV11/local_include/iconv.h"
+
+set +e
+OUT11=$(TEST_MODE=1 SYS_LOCAL_ICONV_H="$ENV11/local_include/iconv.h" DA_CB_DIR="$ENV11/cb" DA_CONF="$ENV11/cb/options.conf" DA_PHP_DIR="$ENV11/php" SYS_OS_RELEASE="$ENV11/os/os-release" PATH="$ENV11/bin:$PATH" bash "$SCRIPT_PATH" 2>&1)
+EXIT11=$?
+set -e
+
+assert_output_contains "Detecta iconv.h conflictivo" "conflictivo con PHP 8+. Neutralizando para priorizar iconv nativo de glibc" "$OUT11"
+if [[ ! -f "$ENV11/local_include/iconv.h" && -f "$ENV11/local_include/iconv.h.cbbak" ]]; then
+  echo "  [PASS] iconv.h fue neutralizado/renombrado a .cbbak"
+  pass_count=$((pass_count + 1))
+else
+  echo "  [FAIL] iconv.h no fue neutralizado correctamente"
+  fail_count=$((fail_count + 1))
+fi
+assert_output_contains "PHP 8.1 recompilado tras resolver iconv" "php_expert 8.1 php-fpm" "$OUT11"
+assert_exit_code "Exit code 0 tras recompilacion de PHP 8.1" "0" "$EXIT11"
 
 echo ""
 echo "======================================================================"

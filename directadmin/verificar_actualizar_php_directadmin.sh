@@ -431,6 +431,10 @@ check_build_environment() {
       build_env_reason="Compilador gcc o make no disponible"
       return 1
     fi
+    if [[ "$target_comp" =~ ^php8 ]] && [[ -n "${SYS_LOCAL_ICONV_H:-}" && -f "$SYS_LOCAL_ICONV_H" ]]; then
+      echo "Detectado $SYS_LOCAL_ICONV_H conflictivo con PHP 8+. Neutralizando para priorizar iconv nativo de glibc..."
+      mv "$SYS_LOCAL_ICONV_H" "${SYS_LOCAL_ICONV_H}.cbbak" 2>/dev/null || true
+    fi
     return 0
   fi
 
@@ -569,7 +573,49 @@ check_build_environment() {
     fi
   fi
 
-  # 5. Espacio libre en disco (minimo 500MB en particion de CustomBuild)
+  # 6. Comprobar y resolver compatibilidad de iconv para PHP >= 8.0 (evitar 'iconv does not support errno')
+  if [[ "$target_comp" =~ ^php8 ]]; then
+    # Asegurar que glibc-devel este instalado para proveer /usr/include/iconv.h nativo
+    if ! [[ -f /usr/include/iconv.h ]] && command -v yum >/dev/null 2>&1; then
+      if (( DRY_RUN == 0 && TEST_MODE == 0 )); then
+        yum install -y glibc-devel 2>/dev/null || true
+      fi
+    fi
+
+    # Detectar y neutralizar header obsoleto de libiconv en /usr/local/include
+    local local_iconv="${SYS_LOCAL_ICONV_H:-/usr/local/include/iconv.h}"
+    if [[ -f "$local_iconv" ]]; then
+      if (( DRY_RUN == 1 )); then
+        echo "[DRY-RUN] Detectado $local_iconv obsoleto que causa 'iconv does not support errno' en PHP 8+; en ejecucion real se neutralizaria."
+      elif (( TEST_MODE == 1 )); then
+        echo "Detectado $local_iconv conflictivo con PHP 8+. Neutralizando para priorizar iconv nativo de glibc..."
+        mv "$local_iconv" "${local_iconv}.cbbak" 2>/dev/null || true
+      else
+        echo "Detectado $local_iconv conflictivo con PHP 8+. Neutralizando para priorizar iconv nativo de glibc..."
+        run_cb remove_old_local libiconv >/dev/null 2>&1 || true
+
+        if [[ -f "$local_iconv" ]]; then
+          local bak_name="${local_iconv}.cbbak_$(date +%Y%m%d%H%M%S)"
+          mv "$local_iconv" "$bak_name" 2>/dev/null || true
+          echo "Header $local_iconv respaldado como $(basename "$bak_name") exitosamente."
+        fi
+      fi
+    fi
+
+    # Corregir configuraciones personalizadas que fuercen --with-iconv=/usr/local
+    for cfg_dir in "$CB_DIR/custom/fpm" "$CB_DIR/custom/ap2" "$CB_DIR/custom/php" "$CB_DIR/custom/suphp" "$CB_DIR/custom/fastcgi"; do
+      if [[ -d "$cfg_dir" ]]; then
+        for cfg_file in "$cfg_dir/configure.${target_comp}" "$cfg_dir/configure.php81" "$cfg_dir/configure.php82" "$cfg_dir/configure.php83"; do
+          if [[ -f "$cfg_file" ]] && grep -q -- '--with-iconv=/usr/local' "$cfg_file" 2>/dev/null; then
+            echo "Corrigiendo flag obsoleto --with-iconv=/usr/local en $cfg_file..."
+            sed -i.bak 's/--with-iconv=\/usr\/local/--with-iconv=\/usr/g' "$cfg_file" 2>/dev/null || true
+          fi
+        done
+      fi
+    done
+  fi
+
+  # 7. Espacio libre en disco (minimo 500MB en particion de CustomBuild)
   local free_mb
   free_mb=$(df -m "$CB_DIR" 2>/dev/null | awk 'NR==2 {print $4}' || echo 1000)
   if [[ -n "$free_mb" && "$free_mb" =~ ^[0-9]+$ ]] && (( free_mb < 500 )); then
@@ -578,7 +624,7 @@ check_build_environment() {
     return 1
   fi
 
-  # 6. Memoria disponible suficiente
+  # 8. Memoria disponible suficiente
   local mem_avail_mb
   mem_avail_mb=$(free -m 2>/dev/null | awk '/Mem:/ {print $7}' || echo "")
   if [[ -z "$mem_avail_mb" || "$mem_avail_mb" == "0" ]]; then
