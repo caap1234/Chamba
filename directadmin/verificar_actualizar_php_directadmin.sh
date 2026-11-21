@@ -23,6 +23,8 @@ set -uo pipefail
 export LC_ALL=C
 export PATH="/usr/local/bin:/usr/local/directadmin:$PATH"
 export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/local/libzip/lib/pkgconfig:/usr/lib64/pkgconfig:/usr/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+export MANPATH="${MANPATH:-}"
+export INFOPATH="${INFOPATH:-}"
 
 # ------------------------------------------------------------------------------
 # 1. PARAMETROS Y CONFIGURACION INICIAL
@@ -525,8 +527,13 @@ check_build_environment() {
         for dt in 11 10 9 8 7; do
           if [[ -f "/opt/rh/devtoolset-${dt}/enable" ]]; then
             echo "Activando entorno de compilacion C11 devtoolset-${dt} para PHP..."
+            set +u
+            export MANPATH="${MANPATH:-}"
+            export INFOPATH="${INFOPATH:-}"
+            export PCP_DIR="${PCP_DIR:-}"
             # shellcheck source=/dev/null
             source "/opt/rh/devtoolset-${dt}/enable"
+            set -u
             found_devtoolset=1
             break
           fi
@@ -539,8 +546,13 @@ check_build_environment() {
           yum install -y devtoolset-11-gcc devtoolset-11-gcc-c++ 2>/dev/null || yum install -y devtoolset-9-gcc devtoolset-9-gcc-c++ 2>/dev/null || true
           for dt in 11 10 9; do
             if [[ -f "/opt/rh/devtoolset-${dt}/enable" ]]; then
+              set +u
+              export MANPATH="${MANPATH:-}"
+              export INFOPATH="${INFOPATH:-}"
+              export PCP_DIR="${PCP_DIR:-}"
               # shellcheck source=/dev/null
               source "/opt/rh/devtoolset-${dt}/enable"
+              set -u
               found_devtoolset=1
               break
             fi
