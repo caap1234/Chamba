@@ -136,6 +136,10 @@ case "$cmd" in
     echo "[MOCK_CB] Compilando apache..."
     exit 0
     ;;
+  libzip)
+    echo "[MOCK_CB] Compilando libzip..."
+    exit 0
+    ;;
   *)
     exit 0
     ;;

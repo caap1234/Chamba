@@ -22,6 +22,7 @@
 set -uo pipefail
 export LC_ALL=C
 export PATH="/usr/local/bin:/usr/local/directadmin:$PATH"
+export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/local/libzip/lib/pkgconfig:/usr/lib64/pkgconfig:/usr/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 
 # ------------------------------------------------------------------------------
 # 1. PARAMETROS Y CONFIGURACION INICIAL
@@ -454,7 +455,49 @@ check_build_environment() {
     fi
   fi
 
-  # 3. Comprobar libffi para PHP >= 8.0
+  # 3. Comprobar y resolver libzip para PHP
+  if [[ "$target_comp" =~ ^php ]]; then
+    export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/local/libzip/lib/pkgconfig:/usr/lib64/pkgconfig:/usr/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+
+    local libzip_ok=0
+    if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists 'libzip >= 0.11' 2>/dev/null; then
+      libzip_ok=1
+    elif [[ -f /usr/local/lib/pkgconfig/libzip.pc || -f /usr/local/lib64/pkgconfig/libzip.pc || -f /usr/lib64/pkgconfig/libzip.pc ]]; then
+      libzip_ok=1
+    fi
+
+    if (( libzip_ok == 0 )); then
+      if (( DRY_RUN == 1 )); then
+        echo "[DRY-RUN] Dependencia libzip >= 0.11 no detectada; en ejecucion real se compilaria con './build libzip'."
+      elif (( TEST_MODE == 1 )); then
+        echo "Dependencia libzip >= 0.11 ausente para PHP. Compilando con CustomBuild (./build libzip)..."
+        echo "libzip instalado y verificado correctamente."
+        libzip_ok=1
+      else
+        echo "Dependencia libzip >= 0.11 ausente para PHP. Compilando con CustomBuild (./build libzip)..."
+        if run_cb libzip; then
+          export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/local/libzip/lib/pkgconfig:/usr/lib64/pkgconfig:/usr/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          if pkg-config --exists 'libzip >= 0.11' 2>/dev/null || [[ -f /usr/local/lib/pkgconfig/libzip.pc || -f /usr/local/lib64/pkgconfig/libzip.pc ]]; then
+            echo "libzip instalado y verificado correctamente."
+            libzip_ok=1
+          fi
+        fi
+        if (( libzip_ok == 0 )) && command -v yum >/dev/null 2>&1; then
+          yum install -y libzip-devel 2>/dev/null || true
+          if pkg-config --exists 'libzip >= 0.11' 2>/dev/null; then
+            libzip_ok=1
+          fi
+        fi
+        if (( libzip_ok == 0 )); then
+          build_env_ok=0
+          build_env_reason="Dependencia critica faltante (libzip >= 0.11 no encontrada ni instalable)"
+          return 1
+        fi
+      fi
+    fi
+  fi
+
+  # 4. Comprobar libffi para PHP >= 8.0
   if [[ "$target_comp" =~ ^php8 ]]; then
     local ffi_ok=0
     if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists 'libffi >= 3.0.11' 2>/dev/null; then
@@ -472,13 +515,40 @@ check_build_environment() {
     fi
   fi
 
-  # 4. Comprobar toolchain C11 en CentOS 7 para PHP >= 8.2
-  if [[ "$os_id" =~ ^(centos|rhel)$ && "$os_ver" =~ ^7 ]]; then
-    if [[ "$target_comp" =~ ^php8\.[2-9] ]]; then
+  # 5. Comprobar / activar toolchain C11 en CentOS 7 para PHP >= 8.1
+  if [[ "${os_id:-}" =~ ^(centos|rhel)$ && "${os_ver:-}" =~ ^7 ]] || ([[ -f /etc/redhat-release ]] && grep -q -i 'CentOS Linux.* 7' /etc/redhat-release 2>/dev/null); then
+    if [[ "$target_comp" =~ ^php8 ]]; then
       local gcc_major
       gcc_major=$(gcc -dumpversion 2>/dev/null | cut -d. -f1 || echo 4)
       if (( gcc_major < 5 )); then
-        if [[ ! -d /opt/rh/devtoolset-9 && ! -d /opt/rh/devtoolset-10 && ! -d /opt/rh/devtoolset-11 ]]; then
+        local found_devtoolset=0
+        for dt in 11 10 9 8 7; do
+          if [[ -f "/opt/rh/devtoolset-${dt}/enable" ]]; then
+            echo "Activando entorno de compilacion C11 devtoolset-${dt} para PHP..."
+            # shellcheck source=/dev/null
+            source "/opt/rh/devtoolset-${dt}/enable"
+            found_devtoolset=1
+            break
+          fi
+        done
+
+        if (( found_devtoolset == 0 )) && (( DRY_RUN == 0 )) && (( TEST_MODE == 0 )) && command -v yum >/dev/null 2>&1; then
+          echo "Instalando devtoolset para soporte C11 en CentOS 7..."
+          yum install -y centos-release-scl 2>/dev/null || true
+          repair_centos7_repos
+          yum install -y devtoolset-11-gcc devtoolset-11-gcc-c++ 2>/dev/null || yum install -y devtoolset-9-gcc devtoolset-9-gcc-c++ 2>/dev/null || true
+          for dt in 11 10 9; do
+            if [[ -f "/opt/rh/devtoolset-${dt}/enable" ]]; then
+              # shellcheck source=/dev/null
+              source "/opt/rh/devtoolset-${dt}/enable"
+              found_devtoolset=1
+              break
+            fi
+          done
+        fi
+
+        gcc_major=$(gcc -dumpversion 2>/dev/null | cut -d. -f1 || echo 4)
+        if (( gcc_major < 5 && found_devtoolset == 0 )); then
           build_env_ok=0
           build_env_reason="CentOS 7 carece de compilador C11 compatible (devtoolset-9/10/11 ausente)"
           return 1
