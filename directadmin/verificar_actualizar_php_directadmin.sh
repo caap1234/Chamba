@@ -370,6 +370,38 @@ done
 build_env_ok=1
 build_env_reason=""
 
+repair_centos7_repos() {
+  local is_centos7=0
+  if [[ "${os_id:-}" =~ ^(centos|rhel)$ && "${os_ver:-}" =~ ^7 ]] || ([[ -f /etc/redhat-release ]] && grep -q -i 'CentOS Linux.* 7' /etc/redhat-release 2>/dev/null); then
+    is_centos7=1
+  fi
+
+  (( is_centos7 == 1 )) || return 1
+
+  if (( DRY_RUN == 1 )); then
+    echo "[DRY-RUN] Repositorios de CentOS 7 descontinuados detectados; en ejecucion real se redirigirian a vault.centos.org."
+    return 0
+  fi
+
+  echo "Detectados repositorios de CentOS 7 descontinuados (mirror.centos.org). Redirigiendo a vault.centos.org..."
+  mkdir -p /etc/yum.repos.d/backup_pre_patch 2>/dev/null || true
+  cp -n /etc/yum.repos.d/*.repo /etc/yum.repos.d/backup_pre_patch/ 2>/dev/null || true
+
+  if sed --version >/dev/null 2>&1; then
+    sed -i 's/mirror.centos.org/vault.centos.org/g' /etc/yum.repos.d/*.repo 2>/dev/null || true
+    sed -i 's/^#.*baseurl=http/baseurl=http/g' /etc/yum.repos.d/*.repo 2>/dev/null || true
+    sed -i 's/^mirrorlist=http/#mirrorlist=http/g' /etc/yum.repos.d/*.repo 2>/dev/null || true
+  else
+    sed -i '' 's/mirror.centos.org/vault.centos.org/g' /etc/yum.repos.d/*.repo 2>/dev/null || true
+    sed -i '' 's/^#.*baseurl=http/baseurl=http/g' /etc/yum.repos.d/*.repo 2>/dev/null || true
+    sed -i '' 's/^mirrorlist=http/#mirrorlist=http/g' /etc/yum.repos.d/*.repo 2>/dev/null || true
+  fi
+
+  yum clean all >/dev/null 2>&1 || true
+  yum makecache fast >/dev/null 2>&1 || true
+  return 0
+}
+
 check_build_environment() {
   local target_comp="$1"
   build_env_ok=1
@@ -377,9 +409,14 @@ check_build_environment() {
 
   if (( TEST_MODE == 1 )); then
     if [[ "${MOCK_BROKEN_REPO:-0}" == "1" ]]; then
-      build_env_ok=0
-      build_env_reason="Repositorios del sistema no funcionales (Cannot find a valid baseurl for repo: base/7)"
-      return 1
+      if [[ "${MOCK_ALLOW_VAULT_FIX:-0}" == "1" ]]; then
+        echo "Detectados repositorios de CentOS 7 descontinuados (mirror.centos.org). Redirigiendo a vault.centos.org..."
+        echo "Repositorios de CentOS 7 redirigidos exitosamente a vault.centos.org."
+      else
+        build_env_ok=0
+        build_env_reason="Repositorios del sistema no funcionales (Cannot find a valid baseurl for repo: base/7)"
+        return 1
+      fi
     fi
     if [[ "${MOCK_MISSING_LIBFFI:-0}" == "1" ]]; then
       build_env_ok=0
@@ -406,9 +443,14 @@ check_build_environment() {
     local yum_test
     yum_test=$(timeout 8 yum repolist -q 2>&1 || true)
     if echo "$yum_test" | grep -E -q 'Cannot find a valid baseurl|Error: Cannot retrieve repository|Could not resolve host'; then
-      build_env_ok=0
-      build_env_reason="Repositorios del sistema no funcionales (yum repolist fallo con error de baseurl)"
-      return 1
+      if repair_centos7_repos; then
+        yum_test=$(timeout 15 yum repolist -q 2>&1 || true)
+      fi
+      if echo "$yum_test" | grep -E -q 'Cannot find a valid baseurl|Error: Cannot retrieve repository|Could not resolve host'; then
+        build_env_ok=0
+        build_env_reason="Repositorios del sistema no funcionales (yum repolist fallo con error de baseurl)"
+        return 1
+      fi
     fi
   fi
 

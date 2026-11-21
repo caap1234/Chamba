@@ -370,6 +370,16 @@ assert_output_contains "Detecta repositorios rotos y omite compilacion" "Reposit
 assert_output_not_contains "No ejecuta php_expert si repos estan rotos" "[MOCK_CB] Compilando" "$OUT4"
 assert_output_contains "Queda como NO VERIFICADO sin provocar fallo destructor" "Estado: NO VERIFICADO" "$OUT4"
 
+# --- Escenario 4b: CentOS 7 con repositorios descontinuados autorreparados hacia vault ---
+echo "Test 4b: Servidor CentOS 7 con repositorios descontinuados autorreparados a vault"
+set +e
+OUT4B=$(TEST_MODE=1 MOCK_BROKEN_REPO=1 MOCK_ALLOW_VAULT_FIX=1 DA_CB_DIR="$ENV4/cb" DA_CONF="$ENV4/cb/options.conf" DA_PHP_DIR="$ENV4/php" SYS_OS_RELEASE="$ENV4/os/os-release" PATH="$ENV4/bin:$PATH" bash "$SCRIPT_PATH" 2>&1)
+EXIT4B=$?
+set -e
+
+assert_output_contains "Detecta repositorios descontinuados y aplica redireccion" "Redirigiendo a vault.centos.org" "$OUT4B"
+assert_output_contains "Confirma repositorios redirigidos exitosamente" "Repositorios de CentOS 7 redirigidos exitosamente a vault.centos.org" "$OUT4B"
+
 # --- Escenario 5: Servidor con libffi faltante ---
 echo "Test 5: Servidor con libffi faltante"
 ENV5=$(setup_mock_env "test5")
