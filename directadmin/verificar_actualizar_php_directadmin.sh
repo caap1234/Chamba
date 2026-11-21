@@ -56,6 +56,9 @@ APACHE_MIN="2.4.71"
 apache_installed=0
 apache_needs=0
 apache_v=""
+apache_compiled=0
+php_compiled=0
+cb_apache_latest=""
 
 branches=() needs=0 failed=0
 
@@ -155,6 +158,12 @@ if [[ -n "$httpd_bin" ]] || [[ "$webserver" =~ ^(apache|nginx_apache)$ ]]; then
   else
     echo "Apache (HTTPD): ${apache_v:-NO DISPONIBLE} - ACTUALIZACION REQUERIDA (Requiere >= $APACHE_MIN para corregir mod_http2 CVE-2026-119618)"
     apache_needs=1
+    if [[ -f "$CB_DIR/versions.txt" ]]; then
+      cb_apache_init=$(grep -E '^(apache2\.4|apache):' "$CB_DIR/versions.txt" 2>/dev/null | head -n1 | cut -d: -f2 | tr -d '\r')
+      if [[ -n "$cb_apache_init" ]]; then
+        echo "  -> Maxima version en CustomBuild local: $cb_apache_init"
+      fi
+    fi
   fi
 else
   echo "Servidor Web: ${webserver:-desconocido} (no es Apache, omitido)"
@@ -207,24 +216,50 @@ if (( needs || apache_needs || FORCE == 1 )); then
   if run_cb update; then
     echo '--- Versiones disponibles en CustomBuild ---'
     run_cb versions 2>/dev/null | grep -E -i 'apache|httpd|php' | head -n 20 || true
+
+    cb_apache_latest=$(run_cb versions 2>/dev/null | sed -n 's/^Latest version of Apache: //p' | head -n1 | tr -d '\r')
+    if [[ -z "$cb_apache_latest" && -f "$CB_DIR/versions.txt" ]]; then
+      cb_apache_latest=$(grep -E '^(apache2\.4|apache):' "$CB_DIR/versions.txt" 2>/dev/null | head -n1 | cut -d: -f2 | tr -d '\r')
+    fi
+
+    apache_can_update=0
+    if [[ -n "$cb_apache_latest" ]] && meets "$cb_apache_latest" "$APACHE_MIN"; then
+      apache_can_update=1
+    fi
+
+    # 1. Gestion de Apache: Validar disponibilidad antes de compilar
+    if (( apache_installed == 1 )) && (( apache_needs || FORCE == 1 )); then
+      if (( apache_can_update == 1 )); then
+        echo "===== RECOMPILANDO APACHE CON CUSTOMBUILD (actualizando a $cb_apache_latest >= $APACHE_MIN mod_http2) ====="
+        if ! run_cb apache; then
+          echo 'ERROR: CustomBuild reporto un fallo al compilar Apache.'
+          failed=1
+        else
+          apache_compiled=1
+        fi
+      else
+        echo "AVISO: Apache requiere >= $APACHE_MIN pero CustomBuild solo dispone de ${cb_apache_latest:-desconocida}."
+        echo "       No esta disponible la version $APACHE_MIN en los mirrors de DirectAdmin; se omite recompilacion de Apache."
+      fi
+    fi
+
+    # 2. Gestion de PHP
     if (( needs || FORCE == 1 )); then
       echo '===== RECOMPILANDO PHP CON CUSTOMBUILD (aplicando versiones y parches) ====='
       if ! run_cb php; then
         echo 'ERROR: CustomBuild reporto un fallo al compilar PHP.'
         failed=1
+      else
+        php_compiled=1
       fi
+    else
+      echo 'PHP: Las ramas instaladas ya cumplen con los parches de seguridad; se omite compilacion de PHP.'
     fi
 
-    if (( apache_needs || FORCE == 1 )) && (( apache_installed == 1 )); then
-      echo '===== RECOMPILANDO APACHE CON CUSTOMBUILD (actualizando a >= 2.4.71 mod_http2) ====='
-      if ! run_cb apache; then
-        echo 'ERROR: CustomBuild reporto un fallo al compilar Apache.'
-        failed=1
-      fi
+    if (( apache_compiled || php_compiled )); then
+      echo '===== REESCRIBIENDO CONFIGURACIONES Y REINICIANDO SERVICIOS ====='
+      run_cb rewrite_confs >/dev/null 2>&1 || true
     fi
-
-    echo '===== REESCRIBIENDO CONFIGURACIONES Y REINICIANDO SERVICIOS ====='
-    run_cb rewrite_confs >/dev/null 2>&1 || true
   else
     echo 'ERROR: No se pudo actualizar metadatos de CustomBuild (./build update).'
     failed=1
@@ -249,10 +284,18 @@ if (( apache_installed )); then
     apache_final_v=$("$final_httpd_bin" -v 2>/dev/null | sed -n 's/.*Apache\/\([0-9.]*\).*/\1/p' | head -n1)
   fi
 
+  if [[ -z "$cb_apache_latest" && -f "$CB_DIR/versions.txt" ]]; then
+    cb_apache_latest=$(grep -E '^(apache2\.4|apache):' "$CB_DIR/versions.txt" 2>/dev/null | head -n1 | cut -d: -f2 | tr -d '\r')
+  fi
+
   if [[ -n "$apache_final_v" ]] && meets "$apache_final_v" "$APACHE_MIN"; then
     echo "OK Apache (HTTPD): $apache_final_v >= $APACHE_MIN - CUMPLE (mod_http2 CVE-2026-119618 corregido)"
   else
-    echo "FALLO Apache (HTTPD): ${apache_final_v:-NO DISPONIBLE} < $APACHE_MIN (Vulnerable a CVE-2026-119618 en mod_http2)"
+    if [[ -n "$cb_apache_latest" ]] && ! meets "$cb_apache_latest" "$APACHE_MIN"; then
+      echo "FALLO Apache (HTTPD): ${apache_final_v:-NO DISPONIBLE} < $APACHE_MIN - NO CUMPLE (DirectAdmin CustomBuild aun no ofrece >= $APACHE_MIN; version maxima en mirrors: $cb_apache_latest)"
+    else
+      echo "FALLO Apache (HTTPD): ${apache_final_v:-NO DISPONIBLE} < $APACHE_MIN - NO CUMPLE (Vulnerable a CVE-2026-119618 en mod_http2)"
+    fi
     failed=1
   fi
 fi
@@ -264,14 +307,14 @@ for branch in "${branches[@]}"; do
     if [[ "$v" != 'NO DISPONIBLE' ]] && is_da_backported "$branch"; then
       echo "OK PHP $branch: $v - CUMPLE (${BACKPORT[$branch]})"
     else
-      echo "FALLO PHP $branch: $v (${BACKPORT[$branch]} no verificado)"
+      echo "FALLO PHP $branch: $v - NO CUMPLE (${BACKPORT[$branch]} no verificado)"
       failed=1
     fi
   elif [[ -n "${MIN[$branch]:-}" ]]; then
     if [[ "$v" != 'NO DISPONIBLE' ]] && meets "$v" "${MIN[$branch]}"; then
       echo "OK PHP $branch: $v >= ${MIN[$branch]} - CUMPLE (Corregida)"
     else
-      echo "FALLO PHP $branch: $v (minimo ${MIN[$branch]})"
+      echo "FALLO PHP $branch: $v - NO CUMPLE (minimo ${MIN[$branch]})"
       failed=1
     fi
   fi
