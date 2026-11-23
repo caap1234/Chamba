@@ -50,6 +50,7 @@ Ejemplos:
   sudo bash verificar_actualizar_php_vps.sh --check --force
   sudo bash verificar_actualizar_php_vps.sh --dry-run --force
   sudo bash verificar_actualizar_php_vps.sh --update
+  bash -s -- --check < verificar_actualizar_php_vps.sh
 
 Los informes y respaldos se guardan en /root.
 Salida: 0 sin hallazgos en el alcance evaluado, 1 pendientes o intervención,
@@ -1455,12 +1456,18 @@ branch_summary() {
 }
 
 summary() {
-  local rc=$1 work=$2 mode=$3 log=$4
+  local rc=$1 work=$2 mode=$3 log=$4 logger_pid=$5 console_out=$6 console_err=$7
   trap - EXIT
   if [[ -n "$work" ]]; then
     if ! rm -rf -- "$work"; then rc=2; fi
   fi
   say "Resultado: $rc | modo: $mode | log: $log"
+  # Cierra el escritor del FIFO y espera a que el log llegue a la consola SSH.
+  exec 1>&"$console_out" 2>&"$console_err" {console_out}>&- {console_err}>&-
+  if ! wait "$logger_pid"; then
+    printf 'ERROR: No se pudo completar el log %s.\n' "$log" >&2
+    rc=2
+  fi
   exit "$rc"
 }
 
@@ -1492,15 +1499,22 @@ main() {
   local -A installed=()
   local -A planned=() planned_repo=() seen_path=() seen_unit=() affected_file=() extension_before=()
   local -A service_exe=() service_type=() frontend_units=() service_pid_before=()
-  for key in awk sort grep date tee mktemp find readlink timeout flock df tar cmp; do
+  for key in awk sort grep date tee mktemp mkfifo find readlink timeout flock df tar cmp; do
     have "$key" || { say "Falta una dependencia del sistema: $key" >&2; return 2; }
   done
   today=$(date -u +%F) || return 2
   stamp=$(date -u +%Y%m%d_%H%M%S) || return 2
   log=$(mktemp "/root/php_security_vps_$stamp.XXXXXXXX.log") || return 2
-  exec > >(tee -a "$log") 2>&1
-  local exit_args
-  printf -v exit_args '%q %q %q' "$work" "$mode" "$log"
+  work=$(mktemp -d /var/tmp/php-security-vps.XXXXXXXX) || die 'No se pudo crear el directorio de trabajo.'
+  local exit_args logger_pid console_out console_err
+  if ! mkfifo "$work/output" || ! exec {console_out}>&1 {console_err}>&2; then
+    rm -rf -- "$work"
+    die 'No se pudo preparar el log.'
+  fi
+  tee -a "$log" < "$work/output" &
+  logger_pid=$!
+  exec > "$work/output" 2>&1
+  printf -v exit_args '%q %q %q %q %q %q' "$work" "$mode" "$log" "$logger_pid" "$console_out" "$console_err"
   trap 'summary "$?" '"$exit_args" EXIT
   trap 'exit 2' HUP INT TERM
   say "Inicio: $(date -u +%FT%TZ) | modo: $mode | arquitectura: $(uname -m)"
@@ -1537,9 +1551,6 @@ main() {
     exec {lock_fd}>/run/lock/php-security-vps.lock || die 'No se pudo abrir el bloqueo de ejecución.'
     flock -n "$lock_fd" || die 'Ya hay otra ejecución de actualización PHP.'
   fi
-  work=$(mktemp -d /var/tmp/php-security-vps.XXXXXXXX) || die 'No se pudo crear el directorio de trabajo.'
-  printf -v exit_args '%q %q %q' "$work" "$mode" "$log"
-  trap 'summary "$?" '"$exit_args" EXIT
   : > "$work/paths"
   host_mount_namespace=$(readlink /proc/self/ns/mnt) || die 'No se pudo identificar el espacio de montaje del host.'
   case "$family" in
@@ -1601,4 +1612,7 @@ main() {
 }
 
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi
+# Bash deja BASH_SOURCE vacío al recibir el script por stdin.
+if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then
+  main "$@" </dev/null
+fi

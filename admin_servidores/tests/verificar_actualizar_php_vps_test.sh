@@ -265,4 +265,38 @@ PY
   pass 'resolución DNF rechaza otro proveedor, rama, altas o bajas y valida digest de configuración'
 fi
 
+# La consola ejecuta un envoltorio sh con stdin cerrado y registra el estado
+# después de ejecutar el comando del usuario.
+script="$test_dir/../verificar_actualizar_php_vps.sh"
+cat > "$work/ssh-wrapper" <<'SH'
+cat "$1" | "$2" -s -- "$3"
+printf '%s\n' "$?" > "$4"
+SH
+for argument in --help --opcion-invalida; do
+  sh "$work/ssh-wrapper" "$script" "$BASH" "$argument" "$work/ssh.exit" \
+    </dev/null > "$work/ssh.log" 2>&1 || fail 'envoltorio SSH'
+  if [[ "$argument" == --help ]]; then expected=0; else expected=2; fi
+  expect "$expected" "$(cat "$work/ssh.exit")"
+  grep -q '^Uso:' "$work/ssh.log" || fail 'salida por stdin incompleta'
+done
+pass 'bash -s funciona con stdin no interactivo y devuelve el estado al envoltorio'
+
+# Comprueba la entrega completa de la salida antes de devolver el estado.
+(
+  log_work="$work/logger"
+  mkdir "$log_work" || exit 1
+  mkfifo "$log_work/output" || exit 1
+  exec {console_out}>&1 {console_err}>&2
+  tee "$work/summary.log" < "$log_work/output" &
+  logger_pid=$!
+  exec > "$log_work/output" 2>&1
+  say 'Inventario terminado'
+  summary 3 "$log_work" check "$work/summary.log" "$logger_pid" "$console_out" "$console_err"
+) > "$work/console.log" 2>&1
+expect 3 "$?"
+cmp "$work/summary.log" "$work/console.log" || fail 'salida distinta en consola y log'
+grep -q '^Resultado: 3 ' "$work/console.log" || fail 'resumen final incompleto'
+[[ ! -e "$work/logger" ]] || fail 'directorio de trabajo sin limpiar'
+pass 'el cierre del log entrega el resumen y conserva el código de salida'
+
 printf '%d grupos de pruebas aprobados.\n' "$passed"
