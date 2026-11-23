@@ -143,11 +143,20 @@ echo 'Remv php8.3-gd [8.3.6]' >> "$work/remove"
 run_status 1 validate_apt_plan "$work/approved" "$work/remove"
 sed 's/arm64/amd64/g' "$work/plan.test" > "$work/wrong-arch"
 run_status 1 validate_apt_plan "$work/approved" "$work/wrong-arch"
+sed '/^Inst /s/$/ []/' "$work/plan.test" > "$work/apt-empty-suffix"
+run_status 0 validate_apt_plan "$work/approved" "$work/apt-empty-suffix"
+sed '/^Inst /s/$/ [paquete-pendiente]/' "$work/plan.test" > "$work/apt-unresolved"
+run_status 1 validate_apt_plan "$work/approved" "$work/apt-unresolved"
+sed '/^Conf /s/php8.3-fpm/php8.3-gd/' "$work/plan.test" > "$work/apt-unapproved-conf"
+run_status 1 validate_apt_plan "$work/approved" "$work/apt-unapproved-conf"
 pass 'guardia APT rechaza altas, bajas y arquitectura distinta'
 
 run_status 0 rpm_modularity_compatible 'php:remi-8.3:42:xyz' 0:8.3.37-1.module_el9.remi remi-modular
 run_status 1 rpm_modularity_compatible 'php:remi-8.3:42:xyz' 0:8.4.28-1.module_el9.remi remi-modular
 run_status 1 rpm_modularity_compatible 'php:remi-8.3:42:xyz' 0:8.3.37-1.module_el9 appstream
+expect remi "$(rpm_provider "Remi's RPM repository <https://rpms.remirepo.net/> #StandWithUkraine")"
+expect remi "$(rpm_provider "Remi's RPM repository <https://rpms.remirepo.net/>")"
+expect '' "$(rpm_provider "Remi's RPM repository <https://example.test/> #StandWithUkraine")"
 pass 'RPM conserva rama y origen modular'
 
 (

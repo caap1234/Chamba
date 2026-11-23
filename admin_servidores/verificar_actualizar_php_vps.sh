@@ -460,8 +460,11 @@ tracker_fix_available() {
 fetch_changelog() {
   local key=$1 binary_version=$2 filename="$work/changelog.$3"
   [[ -e "$filename" ]] || {
-    if ! timeout 30 apt-get "${apt_options[@]}" changelog "$key=$binary_version" > "$filename"; then
+    if ! timeout 30 apt-get "${apt_options[@]}" changelog "$key=$binary_version" > "$filename" 2> "$filename.stderr"; then
       : > "$filename"
+      printf 'Aviso: changelog APT no disponible para %s %s. Se conservará la evidencia de otras fuentes.\n' \
+        "$key" "$binary_version" >&2
+      sed 's/^/  APT: /' "$filename.stderr" >&2
     fi
   }
   [[ -s "$filename" ]]
@@ -627,15 +630,27 @@ validate_apt_plan() {
   awk '
     NR==FNR {approved[$1]=$2; wanted++; next}
     $1=="Remv" || $1=="Purg" {bad=1}
-    $1=="Inst" {
-      if ($3 !~ /^\[/ || $NF !~ /\[[[:alnum:]_-]+\]\)$/) {bad=1; next}
-      arch=$NF; sub(/^\[/,"",arch); sub(/\]\)$/,"",arch)
-      key=$2; if (key !~ /:/) key=key ":" arch
-      revision=$4; sub(/^\(/,"",revision)
-      if (!(key in approved) || revision!=approved[key] || seen[key]++) bad=1
-      count++
+    $1=="Inst" || $1=="Conf" {
+      action=$1
+      last=NF
+      # APT agrega [] cuando se resuelven las dependencias intermedias.
+      if ($last=="[]") last--
+      if ($last !~ /^\[[[:alnum:]_-]+\]\)$/ || (action=="Inst" && $3 !~ /^\[[^]]+\]$/)) {
+        bad=1
+        next
+      }
+      arch=$last; sub(/^\[/,"",arch); sub(/\]\)$/,"",arch)
+      key=$2
+      if (key !~ /:/) key=key ":" arch
+      else if (key !~ (":" arch "$")) {bad=1; next}
+      revision=$(action=="Inst" ? 4 : 3)
+      if (revision !~ /^\(/) {bad=1; next}
+      sub(/^\(/,"",revision)
+      if (!(key in approved) || revision!=approved[key] || seen[action,key]++) bad=1
+      if (action=="Inst") installs++
+      else configs++
     }
-    END {exit (bad || !wanted || count!=wanted)}
+    END {exit (bad || !wanted || installs!=wanted || configs!=wanted)}
   ' "$1" "$2"
 }
 
@@ -757,7 +772,8 @@ PY
 
 rpm_provider() {
   case "$1" in
-    'Remi Collet'|'Remi'|'Remi RPM repository') echo remi ;;
+    'Remi Collet'|'Remi'|'Remi RPM repository'|"Remi's RPM repository <https://rpms.remirepo.net/>"|"Remi's RPM repository <https://rpms.remirepo.net/> #StandWithUkraine")
+      echo remi ;;
     'AlmaLinux'|'AlmaLinux OS Foundation') echo almalinux ;;
     'Rocky Enterprise Software Foundation'|'Rocky Linux') echo rocky ;;
     'Red Hat, Inc.') echo rhel ;;
