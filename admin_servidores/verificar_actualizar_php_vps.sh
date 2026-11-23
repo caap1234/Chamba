@@ -715,9 +715,11 @@ def remi_vendor(vendor):
     return bool(vendor and vendor.startswith(prefix)
                 and re.fullmatch(r"( #[a-zA-Z0-9_]+)*", vendor[len(prefix):]))
 
-def check_rpm(archive, remi_branch=None):
+def check_rpm(archive, remi_branch=None, remi_dependency=False):
     import rpm
     header = read_rpm(archive)
+    if remi_dependency and not remi_vendor(header[rpm.RPMTAG_VENDOR]):
+        raise ValueError("la dependencia descargada no corresponde al proveedor Remi")
     if remi_branch:
         vendor = header[rpm.RPMTAG_VENDOR]
         label = header["modularitylabel"] or ""
@@ -1074,12 +1076,35 @@ build_rpm_guard() {
   cat > "$work/plugins/vps_php_guard.py" <<'PY'
 from collections import Counter
 from pathlib import Path
+import re
 import runpy
 import dnf
 import dnf.exceptions
 from dnf.cli.commands.upgrade import UpgradeCommand
 
 directory = Path(__file__).resolve().parent.parent
+
+def rpm_identity(package):
+    return "{}.{} {}:{}-{} {}".format(package.name, package.arch, package.epoch or 0,
+                                      package.version, package.release, package.repoid)
+
+def required_icu(packages, approved):
+    extra = [package for package in packages if rpm_identity(package) not in approved]
+    if len(extra) != 1:
+        return []
+    icu = extra[0]
+    if (icu.name != "libicu78" or icu.repoid != "remi-safe"
+            or not icu.version.startswith("78.")
+            or not icu.release.endswith(".remi")):
+        return []
+    soname = re.compile(r"libicu(?:data|i18n|io|test|tu|uc)\.so\.78\(\)\(64bit\)")
+    provides = {str(item) for item in icu.provides if soname.fullmatch(str(item))}
+    for package in packages:
+        if (package.name == "php-intl" and package.arch == icu.arch
+                and package.repoid == "remi-modular" and rpm_identity(package) in approved
+                and provides.intersection(str(item) for item in package.requires)):
+            return [rpm_identity(icu)]
+    return []
 
 class Guard(dnf.Plugin):
     name = "vps_php_guard"
@@ -1098,12 +1123,13 @@ class Guard(dnf.Plugin):
             def revision(package):
                 return "{}:{}-{}".format(package.epoch or 0, package.version, package.release)
 
-            incoming = sorted("{} {} {}".format(key(p), revision(p), p.repoid)
-                              for p in transaction.install_set)
+            incoming = sorted(rpm_identity(p) for p in transaction.install_set)
             outgoing = sorted("{} {}".format(key(p), revision(p))
                               for p in transaction.remove_set)
             approved = (directory / "approved.rpm").read_text().splitlines()
             previous = (directory / "previous").read_text().splitlines()
+            dependencies = required_icu(transaction.install_set, approved)
+            approved = sorted(approved + dependencies)
             if not incoming or incoming != approved or outgoing != previous:
                 differences = []
                 for label, actual, expected in (
@@ -1118,6 +1144,13 @@ class Guard(dnf.Plugin):
                             differences.append("{} {}: {}".format(label, prefix, item))
                 detail = "\n".join(differences) or "la transacción está vacía"
                 raise ValueError("el plan de DNF difiere del aprobado\n" + detail)
+            snapshot = directory / "dnf.simulated"
+            if self.base.conf.assumeno:
+                snapshot.write_text("\n".join(incoming) + "\n")
+                for dependency in dependencies:
+                    print("Dependencia directa aprobada de php-intl: " + dependency)
+            elif not snapshot.is_file() or snapshot.read_text().splitlines() != incoming:
+                raise ValueError("la transacción difiere de la simulación previa")
         except Exception as exc:
             raise dnf.exceptions.Error("Transacción PHP rechazada: {}".format(exc))
         (directory / "dnf.guarded").touch()
@@ -1133,7 +1166,7 @@ class Guard(dnf.Plugin):
                 branch = None
                 if package.repoid == "remi-modular":
                     branch = ".".join(package.version.split(".")[:2])
-                check_rpm(package.localPkg(), branch)
+                check_rpm(package.localPkg(), branch, package.name == "libicu78")
         except Exception as exc:
             raise dnf.exceptions.Error("Configuración PHP protegida: {}".format(exc))
 

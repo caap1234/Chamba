@@ -281,9 +281,43 @@ def package(name, version, repoid):
 existing = package("php-fpm", "8.3.36", "@System")
 candidate = package("php-fpm", "8.3.37", "remi-modular")
 transaction = types.SimpleNamespace(install_set=[candidate], remove_set=[existing])
-plugin = guard.Guard(types.SimpleNamespace(transaction=transaction), None)
+plugin = guard.Guard(types.SimpleNamespace(transaction=transaction, conf=types.SimpleNamespace(assumeno=True)), None)
 plugin.resolved()
 assert (directory / "dnf.guarded").exists()
+intl = package("php-intl", "8.3.37", "remi-modular")
+intl.requires = ["libicuuc.so.78()(64bit)"]
+icu = package("libicu78", "78.3", "remi-safe")
+icu.provides = ["libicuuc.so.78()(64bit)"]
+intl_approved = [guard.rpm_identity(intl)]
+assert guard.required_icu([intl, icu], intl_approved) == [guard.rpm_identity(icu)]
+assert not guard.required_icu([intl, icu, candidate], intl_approved)
+icu.repoid = "appstream"
+assert not guard.required_icu([intl, icu], intl_approved)
+icu.repoid = "remi-safe"
+intl.requires = ["libicuuc.so.77()(64bit)"]
+assert not guard.required_icu([intl, icu], intl_approved)
+plugin.base.conf.assumeno = False
+plugin.resolved()
+(directory / "dnf.simulated").write_text("transacción distinta\n")
+try:
+    plugin.resolved()
+except Error as error:
+    assert "difiere de la simulación previa" in str(error)
+else:
+    raise AssertionError("se aceptó una ejecución distinta de la simulación")
+plugin.base.conf.assumeno = True
+(directory / "approved.rpm").write_text(guard.rpm_identity(intl) + "\n")
+(directory / "previous").write_text("php-intl.x86_64 0:8.3.36-1.remi\n")
+intl.requires = ["libicuuc.so.78()(64bit)"]
+transaction.install_set = [intl, icu]
+transaction.remove_set = [package("php-intl", "8.3.36", "@System")]
+plugin.resolved()
+assert guard.rpm_identity(icu) in (directory / "dnf.simulated").read_text()
+plugin.base.conf.assumeno = False
+plugin.resolved()
+plugin.base.conf.assumeno = True
+(directory / "approved.rpm").write_text(guard.rpm_identity(candidate) + "\n")
+(directory / "previous").write_text("php-fpm.x86_64 0:8.3.36-1.remi\n")
 for install, remove in [
     ([package("php-fpm", "8.3.37", "appstream")], [existing]),
     ([package("php-fpm", "8.4.28", "remi-modular")], [existing]),
