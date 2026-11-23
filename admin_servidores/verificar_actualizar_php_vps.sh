@@ -1072,6 +1072,7 @@ audit_rpm() {
 build_rpm_guard() {
   mkdir "$work/plugins" && write_config_guard || return 1
   cat > "$work/plugins/vps_php_guard.py" <<'PY'
+from collections import Counter
 from pathlib import Path
 import runpy
 import dnf
@@ -1104,7 +1105,19 @@ class Guard(dnf.Plugin):
             approved = (directory / "approved.rpm").read_text().splitlines()
             previous = (directory / "previous").read_text().splitlines()
             if not incoming or incoming != approved or outgoing != previous:
-                raise ValueError("cambió el conjunto de paquetes, revisiones o repositorios")
+                differences = []
+                for label, actual, expected in (
+                    ("entrada", incoming, approved), ("salida", outgoing, previous)
+                ):
+                    actual = Counter(actual)
+                    expected = Counter(expected)
+                    for prefix, delta in (
+                        ("no prevista", actual - expected), ("esperada pero ausente", expected - actual)
+                    ):
+                        for item in sorted(delta.elements()):
+                            differences.append("{} {}: {}".format(label, prefix, item))
+                detail = "\n".join(differences) or "la transacción está vacía"
+                raise ValueError("el plan de DNF difiere del aprobado\n" + detail)
         except Exception as exc:
             raise dnf.exceptions.Error("Transacción PHP rechazada: {}".format(exc))
         (directory / "dnf.guarded").touch()

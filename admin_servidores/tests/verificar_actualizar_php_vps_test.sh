@@ -293,7 +293,14 @@ for install, remove in [
     transaction.install_set, transaction.remove_set = install, remove
     try:
         plugin.resolved()
-    except Error:
+    except Error as error:
+        detail = str(error)
+        assert "plan de DNF difiere" in detail
+        for package_item in install:
+            if package_item.repoid != candidate.repoid or package_item.version != candidate.version or package_item.name != candidate.name:
+                assert "entrada no prevista: {}.{}".format(package_item.name, package_item.arch) in detail
+        if len(remove) > 1:
+            assert "salida no prevista: php-gd.x86_64" in detail
         continue
     raise AssertionError("la guardia aceptó un cambio fuera de la transacción aprobada")
 
