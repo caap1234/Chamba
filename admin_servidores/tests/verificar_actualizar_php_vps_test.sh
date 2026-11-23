@@ -157,6 +157,25 @@ run_status 1 rpm_modularity_compatible 'php:remi-8.3:42:xyz' 0:8.3.37-1.module_e
 expect remi "$(rpm_provider "Remi's RPM repository <https://rpms.remirepo.net/> #StandWithUkraine")"
 expect remi "$(rpm_provider "Remi's RPM repository <https://rpms.remirepo.net/>")"
 expect '' "$(rpm_provider "Remi's RPM repository <https://example.test/> #StandWithUkraine")"
+for branch in 8.2 8.4; do
+  revision="0:$(reference "$branch")-1.module_php.$branch.el9.remi"
+  srpm="php-${revision#*:}.src.rpm"
+  expect remi "$(rpm_candidate_provider '' remi-modular "$revision" "$srpm")"
+  expect remi "$(rpm_candidate_provider '(none)' remi-modular "$revision" "$srpm")"
+  expect '' "$(rpm_candidate_provider 'Otro proveedor' remi-modular "$revision" "$srpm")"
+  expect '' "$(rpm_candidate_provider '' appstream "$revision" "$srpm")"
+  expect '' "$(rpm_candidate_provider '' remi-modular "$revision" "otro-$srpm")"
+done
+(
+  rpm_compare() { [[ "$1:$2:$3" == gt:0:8.4.28-1.module_php.8.4.el9.remi:0:8.4.24-1.module_php.8.4.el9.remi ]]; }
+  old=0:8.4.24-1.module_php.8.4.el9.remi
+  new=0:8.4.28-1.module_php.8.4.el9.remi
+  expect '' "$(rpm_candidate_rejection unique "$old" "$new" "php-${old#*:}.src.rpm" \
+    "php-${new#*:}.src.rpm" remi remi remi-modular remi-modular php:remi-8.4:123:abcd 8.4)"
+  expect 'el proveedor del candidato no coincide o no se pudo verificar' \
+    "$(rpm_candidate_rejection unique "$old" "$new" "php-${old#*:}.src.rpm" \
+    "php-${new#*:}.src.rpm" remi '' remi-modular remi-modular php:remi-8.4:123:abcd 8.4)"
+) || fail 'validación del candidato Remi de los logs'
 pass 'RPM conserva rama y origen modular'
 
 (

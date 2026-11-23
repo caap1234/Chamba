@@ -700,11 +700,26 @@ def check_deb(archive):
         if process.wait():
             raise ValueError("no se pudo inspeccionar el archivo " + archive)
 
-def check_rpm(archive):
+def read_rpm(archive):
     import rpm
     with open(archive, "rb") as package:
         transaction = rpm.TransactionSet()
         header = transaction.hdrFromFdno(package.fileno())
+    return header
+
+def check_rpm(archive, remi_branch=None):
+    import rpm
+    header = read_rpm(archive)
+    if remi_branch:
+        vendor = header[rpm.RPMTAG_VENDOR]
+        allowed = {
+            "Remi Collet", "Remi", "Remi RPM repository",
+            "Remi's RPM repository <https://rpms.remirepo.net/>",
+            "Remi's RPM repository <https://rpms.remirepo.net/> #StandWithUkraine",
+        }
+        label = header["modularitylabel"] or ""
+        if vendor not in allowed or label.split(":")[:2] != ["php", "remi-" + remi_branch]:
+            raise ValueError("el RPM descargado no corresponde al proveedor y stream de Remi aprobados")
     paths = header[rpm.RPMTAG_FILENAMES]
     if not paths:
         return
@@ -779,6 +794,32 @@ rpm_provider() {
     'Red Hat, Inc.') echo rhel ;;
     'CentOS'|'CentOS Stream') echo centos ;;
   esac
+}
+
+rpm_candidate_provider() {
+  local vendor=$1 repo=$2 revision=$3 source=$4 provider
+  provider=$(rpm_provider "$vendor")
+  if [[ -n "$provider" ]]; then
+    printf '%s\n' "$provider"
+  elif [[ "$vendor" == '' || "$vendor" == '(none)' || "$vendor" == None ]]; then
+    if [[ "$repo" == remi-modular && "$revision" == *".module_php.$(branch_of "$revision")."*".remi" &&
+          "$source" == "php-${revision#*:}.src.rpm" ]]; then
+      echo remi
+    fi
+  fi
+}
+
+rpm_candidate_rejection() {
+  local record=$1 current=$2 target=$3 source=$4 next_source=$5 provider=$6 next_provider=$7
+  local repo=$8 next_repo=$9 module=${10} branch=${11}
+  if [[ "$record" == *$'\n'* ]]; then echo 'varias publicaciones distintas del candidato'
+  elif [[ "$target" == *'(none)'* || "$branch" != "$(branch_of "$target")" ]]; then echo 'la revisión cambia de rama o no se pudo interpretar'
+  elif [[ -z "$provider" || "$provider" != "$next_provider" ]]; then echo 'el proveedor del candidato no coincide o no se pudo verificar'
+  elif [[ "${source%%-"$(upstream_of "$current")"-*}" != "${next_source%%-"$(upstream_of "$target")"-*}" ]]; then echo 'el paquete fuente del candidato cambió'
+  elif [[ -z "$repo" || "$repo" != "$next_repo" ]]; then echo 'cambió el repositorio de origen o falta el historial'
+  elif ! rpm_modularity_compatible "$module" "$target" "$next_repo"; then echo 'la versión candidata no conserva el stream modular'
+  elif ! rpm_compare gt "$target" "$current"; then echo 'no se pudo confirmar que el candidato tenga una revisión superior'
+  fi
 }
 
 prepare_rpm() {
@@ -941,7 +982,7 @@ remi_evidence() {
 
 audit_rpm() {
   local key current src version state vendor module origin target nextsrc nextvendor nextrepo nextprovider
-  local inst_repo branch nextstate name candidate_record
+  local inst_repo branch nextstate candidate_record rejection
   rpm_python=
   local interpreter
   for interpreter in /usr/libexec/platform-python /usr/bin/python3; do
@@ -962,14 +1003,13 @@ audit_rpm() {
     return 1
   fi
   while IFS='|' read -r key current src version _ vendor module; do
-    name=${key%.*}
     branch=$(branch_of "$version")
     origin=$(rpm_provider "$vendor")
     inst_repo=$("$manager" "${rpm_options[@]}" info --installed "$key" |
       awk -F': *' '/^From repo[[:space:]]*:/ {print $2; exit}')
-    candidate_record=$(awk -F'|' -v key="$key" '$1==key' "$work/rpm.candidates")
+    candidate_record=$(awk -F'|' -v key="$key" '$1==key' "$work/rpm.candidates" | sort -u)
     IFS='|' read -r _ target nextsrc nextvendor nextrepo <<< "$candidate_record"
-    nextprovider=$(rpm_provider "$nextvendor")
+    nextprovider=$(rpm_candidate_provider "$nextvendor" "$nextrepo" "$target" "$nextsrc")
     say "PHP RPM $key | instalado: $current | origen: ${origin:-indeterminado}/${inst_repo:-sin historial} | candidato: ${target:-sin datos} (${nextrepo:-n/a})"
     if ! rpm_core "$src" || [[ -z "$branch" ]]; then
       [[ -z "$target" ]] || manual "$key requiere comprobar el ciclo y advisory de la extensión/metapaquete."
@@ -997,19 +1037,18 @@ audit_rpm() {
     report_evidence "$state" "$key $current"
     if [[ -z "$target" ]]; then continue; fi
     pending=1
-    if [[ "$candidate_record" == *$'\n'* || "$target" == *'(none)'* ||
-          "$branch" != "$(branch_of "$target")" || "$origin" != "$nextprovider" ||
-          "${src%%-"$version"-*}" != "${nextsrc%%-"$(upstream_of "$target")"-*}" ||
-          -z "$inst_repo" || "$inst_repo" != "$nextrepo" ||
-          -z "$(rpm_stream "$module")" ]] ||
-       ! rpm_modularity_compatible "$module" "$target" "$nextrepo" ||
-       ! rpm_compare gt "$target" "$current"; then
-      manual "$key tiene un candidato ambiguo o cambio de proveedor, repositorio, rama o stream."
+    if [[ "$origin" == remi && "$(php_support "$branch")" == 'EOL upstream' ]]; then
+      manual "$key: PHP $branch está fuera del soporte upstream; la evidencia de este script no autoriza la actualización automática de esa rama."
+      continue
+    fi
+    rejection=$(rpm_candidate_rejection "$candidate_record" "$current" "$target" "$src" "$nextsrc" \
+      "$origin" "$nextprovider" "$inst_repo" "$nextrepo" "$module" "$branch")
+    if [[ -n "$rejection" ]]; then
+      manual "$key: $rejection. Candidato: proveedor ${nextvendor:-sin dato}, fuente ${nextsrc:-sin dato}, repositorio ${nextrepo:-sin dato}."
       continue
     fi
     nextstate=3
-    if [[ "$origin" == remi && "$nextrepo" =~ ^remi-(modular|safe|php[0-9]+)$ &&
-          "$(php_support "$branch")" != 'EOL upstream' ]]; then
+    if [[ "$origin" == remi && "$nextrepo" =~ ^remi-(modular|safe|php[0-9]+)$ ]]; then
       remi_evidence "$target" "$branch" && nextstate=0 || nextstate=$?
     elif [[ "$origin" == "$os" && "$nextrepo" == *appstream* && "$support" != "AppStream EOL"* ]]; then
       rpm_updateinfo "$key" "$target" "$branch" && nextstate=0 || nextstate=$?
@@ -1072,7 +1111,10 @@ class Guard(dnf.Plugin):
         try:
             check_rpm = runpy.run_path(str(directory / "config_guard.py"))["check_rpm"]
             for package in self.base.transaction.install_set:
-                check_rpm(package.localPkg())
+                branch = None
+                if package.repoid == "remi-modular":
+                    branch = ".".join(package.version.split(".")[:2])
+                check_rpm(package.localPkg(), branch)
         except Exception as exc:
             raise dnf.exceptions.Error("Configuración PHP protegida: {}".format(exc))
 
