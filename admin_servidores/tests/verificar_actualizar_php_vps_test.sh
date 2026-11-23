@@ -318,4 +318,27 @@ grep -q '^Resultado: 3 ' "$work/console.log" || fail 'resumen final incompleto'
 [[ ! -e "$work/logger" ]] || fail 'directorio de trabajo sin limpiar'
 pass 'el cierre del log entrega el resumen y conserva el código de salida'
 
+(
+  # shellcheck disable=SC2329 # main invoca uname de forma indirecta.
+  uname() { printf '%s\n' 'SistemaFixture'; }
+  run_status 2 main --update
+  grep -Fq 'Sistema detectado: SistemaFixture' "$work/test-output" || fail 'diagnóstico del sistema'
+) || fail 'requisitos de ejecución'
+if (( EUID != 0 )) && [[ -x /usr/bin/sudo ]]; then
+  (
+    exec() {
+      expect /usr/bin/sudo "$1"
+      expect -n "$2"
+      expect /bin/bash "$4"
+      [[ "$5" == /*/verificar_actualizar_php_vps.sh ]] || fail 'ruta del script para sudo'
+      expect --dry-run "$6"
+      expect --force "$7"
+      printf 'sudo invocado\n'
+    }
+    require_root --dry-run --force > "$work/sudo-mock"
+    grep -Fxq 'sudo invocado' "$work/sudo-mock" || fail 'no se intentó sudo'
+  ) || fail 'elevación no interactiva'
+fi
+pass 'diagnóstico del sistema y elevación no interactiva con argumentos intactos'
+
 printf '%d grupos de pruebas aprobados.\n' "$passed"

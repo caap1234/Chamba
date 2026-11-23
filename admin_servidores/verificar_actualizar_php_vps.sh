@@ -1492,6 +1492,22 @@ summary() {
   exit "$rc"
 }
 
+require_root() {
+  (( EUID != 0 )) || return 0
+  local script=${BASH_SOURCE[0]:-}
+  if [[ -z "$script" || ! -f "$script" ]]; then
+    say 'ERROR: UID distinto de 0. Para elevar permisos, descarga el archivo o inicia bash -s con sudo -n.' >&2
+    return 2
+  fi
+  if [[ ! -x /usr/bin/sudo ]]; then
+    say 'ERROR: Se requiere una sesión SSH como root o sudo sin contraseña.' >&2
+    return 2
+  fi
+  [[ "$script" == /* ]] || script="$PWD/$script"
+  say 'Sesión SSH sin root. Intentando sudo no interactivo.' >&2
+  exec /usr/bin/sudo -n -- /bin/bash "$script" "$@"
+}
+
 main() {
   local mode=check mode_selected=0 force=0 refresh=0 option
   for option in "$@"; do
@@ -1505,11 +1521,17 @@ main() {
       *) say "Opción desconocida: $option" >&2; help_text >&2; return 2 ;;
     esac
   done
-  if (( BASH_VERSINFO[0] < 4 || EUID != 0 )) || [[ "$(uname -s)" != Linux ]]; then
-    say 'Se requiere Linux, Bash 4.2 o posterior y privilegios de root.' >&2
+  local kernel
+  kernel=$(uname -s) || return 2
+  if [[ "$kernel" != Linux ]]; then
+    say "ERROR: Se requiere Linux. Sistema detectado: $kernel." >&2
     return 2
   fi
-  if (( BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 2 )); then return 2; fi
+  if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 2) )); then
+    say "ERROR: Se requiere Bash 4.2 o posterior. Versión detectada: $BASH_VERSION." >&2
+    return 2
+  fi
+  require_root "$@" || return $?
   if (( BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4 )); then set +u; fi
   export PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/sbin:/usr/local/bin
   unset PHPRC PHP_INI_SCAN_DIR LD_PRELOAD LD_LIBRARY_PATH BASH_ENV ENV APT_CONFIG PYTHONPATH
