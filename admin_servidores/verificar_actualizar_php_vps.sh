@@ -658,6 +658,7 @@ write_config_guard() {
   cat > "$work/config_guard.py" <<'PY'
 import hashlib
 import os
+import re
 import subprocess
 import sys
 import tarfile
@@ -707,18 +708,20 @@ def read_rpm(archive):
         header = transaction.hdrFromFdno(package.fileno())
     return header
 
+def remi_vendor(vendor):
+    prefix = "Remi's RPM repository <https://rpms.remirepo.net/>"
+    if vendor in {"Remi Collet", "Remi", "Remi RPM repository"}:
+        return True
+    return bool(vendor and vendor.startswith(prefix)
+                and re.fullmatch(r"( #[a-zA-Z0-9_]+)*", vendor[len(prefix):]))
+
 def check_rpm(archive, remi_branch=None):
     import rpm
     header = read_rpm(archive)
     if remi_branch:
         vendor = header[rpm.RPMTAG_VENDOR]
-        allowed = {
-            "Remi Collet", "Remi", "Remi RPM repository",
-            "Remi's RPM repository <https://rpms.remirepo.net/>",
-            "Remi's RPM repository <https://rpms.remirepo.net/> #StandWithUkraine",
-        }
         label = header["modularitylabel"] or ""
-        if vendor not in allowed or label.split(":")[:2] != ["php", "remi-" + remi_branch]:
+        if not remi_vendor(vendor) or label.split(":")[:2] != ["php", "remi-" + remi_branch]:
             raise ValueError("el RPM descargado no corresponde al proveedor y stream de Remi aprobados")
     paths = header[rpm.RPMTAG_FILENAMES]
     if not paths:
@@ -787,8 +790,11 @@ PY
 
 rpm_provider() {
   case "$1" in
-    'Remi Collet'|'Remi'|'Remi RPM repository'|"Remi's RPM repository <https://rpms.remirepo.net/>"|"Remi's RPM repository <https://rpms.remirepo.net/> #StandWithUkraine")
-      echo remi ;;
+    'Remi Collet'|'Remi'|'Remi RPM repository') echo remi ;;
+    "Remi's RPM repository <https://rpms.remirepo.net/>"*)
+      local prefix="Remi's RPM repository <https://rpms.remirepo.net/>"
+      local suffix_pattern='^( #[a-zA-Z0-9_]+)*$'
+      if [[ "${1#"$prefix"}" =~ $suffix_pattern ]]; then echo remi; fi ;;
     'AlmaLinux'|'AlmaLinux OS Foundation') echo almalinux ;;
     'Rocky Enterprise Software Foundation'|'Rocky Linux') echo rocky ;;
     'Red Hat, Inc.') echo rhel ;;

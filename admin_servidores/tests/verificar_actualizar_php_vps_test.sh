@@ -156,6 +156,8 @@ run_status 1 rpm_modularity_compatible 'php:remi-8.3:42:xyz' 0:8.4.28-1.module_e
 run_status 1 rpm_modularity_compatible 'php:remi-8.3:42:xyz' 0:8.3.37-1.module_el9 appstream
 expect remi "$(rpm_provider "Remi's RPM repository <https://rpms.remirepo.net/> #StandWithUkraine")"
 expect remi "$(rpm_provider "Remi's RPM repository <https://rpms.remirepo.net/>")"
+expect remi "$(rpm_provider "Remi's RPM repository <https://rpms.remirepo.net/> #StandWithUkraine #NoAI")"
+expect '' "$(rpm_provider "Remi's RPM repository <https://rpms.remirepo.net/> otro proveedor")"
 expect '' "$(rpm_provider "Remi's RPM repository <https://example.test/> #StandWithUkraine")"
 for branch in 8.2 8.4; do
   revision="0:$(reference "$branch")-1.module_php.$branch.el9.remi"
@@ -298,6 +300,9 @@ for install, remove in [
 config_spec = importlib.util.spec_from_file_location("config_guard", directory / "config_guard.py")
 config_guard = importlib.util.module_from_spec(config_spec)
 config_spec.loader.exec_module(config_guard)
+assert config_guard.remi_vendor("Remi's RPM repository <https://rpms.remirepo.net/> #StandWithUkraine #NoAI")
+assert not config_guard.remi_vendor("Remi's RPM repository <https://example.test/> #NoAI")
+assert not config_guard.remi_vendor("Remi's RPM repository <https://rpms.remirepo.net/> otro proveedor")
 import hashlib
 configuration = directory / "php.ini"
 configuration.write_bytes(b"memory_limit=256M\n")
