@@ -58,12 +58,18 @@ touch "$work/panel/usr/local/cpanel/cpanel"
 expect ninguno "$(detect_panel "$work/panel")"
 chmod +x "$work/panel/usr/local/cpanel/cpanel"
 expect cPanel "$(detect_panel "$work/panel")"
+mkdir -p "$work/da/usr/local/"{directadmin,cpanel} || fail 'fixture de DirectAdmin'
+expect ninguno "$(detect_panel "$work/da")"
+touch "$work/da/usr/local/directadmin/directadmin"
+expect ninguno "$(detect_panel "$work/da")"
+chmod +x "$work/da/usr/local/directadmin/directadmin"
+expect DirectAdmin "$(detect_panel "$work/da")"
 for path in /etc/php /usr/lib/php /etc/init.d/php8.3-fpm /usr/share/doc/php8.3 "$work/usr/bin/php"; do
   if packaged_php_path "$path"; then fail "ruta ajena a PHP ejecutable: $path"; fi
 done
 packaged_php_path "$work/usr/sbin/php-fpm8.3" || fail 'un FPM ausente todavía debe detectarse'
 packaged_php_path /usr/lib/apache2/modules/libphp8.3.so || fail 'mod_php omitido'
-pass 'un directorio residual de cPanel y las rutas auxiliares de PHP no generan falsos positivos'
+pass 'los directorios residuales de cPanel o DirectAdmin y las rutas auxiliares de PHP no generan falsos positivos'
 
 cat > "$work/apt-repos" <<'FIXTURE'
 Package files:

@@ -185,10 +185,11 @@ packaged_php_path() {
 
 detect_panel() {
   local root=${1:-} cpanel="${1:-}/usr/local/cpanel"
+  local directadmin="$root/usr/local/directadmin/directadmin"
   if [[ -f "$cpanel/cpanel" && -x "$cpanel/cpanel" ]] ||
      [[ -f "$cpanel/whostmgr/bin/whostmgr" && -x "$cpanel/whostmgr/bin/whostmgr" ]]; then
     echo cPanel
-  elif [[ -d "$root/usr/local/directadmin" ]]; then echo DirectAdmin
+  elif [[ -f "$directadmin" && -x "$directadmin" ]]; then echo DirectAdmin
   elif [[ -d "$root/usr/local/psa" || -d "$root/opt/psa" || -e "$root/etc/psa/psa.conf" ]]; then echo Plesk
   else echo ninguno
   fi
@@ -1556,6 +1557,10 @@ main() {
   panel=$(detect_panel)
   if [[ "$panel" != cPanel && -d /usr/local/cpanel ]]; then
     say 'Aviso: se encontró /usr/local/cpanel sin ejecutables de cPanel o WHM.'
+  fi
+  if [[ "$panel" != DirectAdmin && -d /usr/local/directadmin &&
+        ! ( -f /usr/local/directadmin/directadmin && -x /usr/local/directadmin/directadmin ) ]]; then
+    say 'Aviso: se encontró /usr/local/directadmin sin el ejecutable de DirectAdmin.'
   fi
   say "Sistema: ${pretty:-$os $release} | gestor: $family | ciclo: $status_os ${lifecycle_end:-sin fecha verificada} | panel: $panel"
   case "$panel" in
