@@ -52,6 +52,19 @@ done
 if php_path /var/www/vendor/phpunit; then fail 'phpunit no es una instalación PHP'; fi
 pass 'detección de CLI/FPM/CGI/mod_php y ramas'
 
+mkdir -p "$work/panel/usr/local/cpanel" "$work/usr/bin/php" || fail 'fixture de inventario'
+expect ninguno "$(detect_panel "$work/panel")"
+touch "$work/panel/usr/local/cpanel/cpanel"
+expect ninguno "$(detect_panel "$work/panel")"
+chmod +x "$work/panel/usr/local/cpanel/cpanel"
+expect cPanel "$(detect_panel "$work/panel")"
+for path in /etc/php /usr/lib/php /etc/init.d/php8.3-fpm /usr/share/doc/php8.3 "$work/usr/bin/php"; do
+  if packaged_php_path "$path"; then fail "ruta ajena a PHP ejecutable: $path"; fi
+done
+packaged_php_path "$work/usr/sbin/php-fpm8.3" || fail 'un FPM ausente todavía debe detectarse'
+packaged_php_path /usr/lib/apache2/modules/libphp8.3.so || fail 'mod_php omitido'
+pass 'un directorio residual de cPanel y las rutas auxiliares de PHP no generan falsos positivos'
+
 cat > "$work/apt-repos" <<'FIXTURE'
 Package files:
  100 /var/lib/dpkg/status

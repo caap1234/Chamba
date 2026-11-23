@@ -174,6 +174,26 @@ php_path() {
   [[ "${1##*/}" =~ ^(php([0-9]+([.][0-9]+)?)?(-cgi|-fpm)?([0-9]+([.][0-9]+)?)?|php-fcgi|lsphp[0-9]*|libphp[0-9.]*\.so)$ ]]
 }
 
+packaged_php_path() {
+  case "$1" in
+    /etc/*|*/share/*|*/include/*) return 1 ;;
+    */bin/*|*/sbin/*|*/cgi-bin/*|*/libphp*.so)
+      [[ ! -d "$1" ]] && php_path "$1" ;;
+    *) return 1 ;;
+  esac
+}
+
+detect_panel() {
+  local root=${1:-} cpanel="${1:-}/usr/local/cpanel"
+  if [[ -f "$cpanel/cpanel" && -x "$cpanel/cpanel" ]] ||
+     [[ -f "$cpanel/whostmgr/bin/whostmgr" && -x "$cpanel/whostmgr/bin/whostmgr" ]]; then
+    echo cPanel
+  elif [[ -d "$root/usr/local/directadmin" ]]; then echo DirectAdmin
+  elif [[ -d "$root/usr/local/psa" || -d "$root/opt/psa" || -e "$root/etc/psa/psa.conf" ]]; then echo Plesk
+  else echo ninguno
+  fi
+}
+
 register_path() {
   local path canonical owner version branch
   path=$1
@@ -218,7 +238,7 @@ inventory_packages() {
   while IFS='|' read -r key _; do
     package_files "$key" > "$work/files.$key" || return 1
     while IFS= read -r path; do
-      if php_path "$path"; then
+      if packaged_php_path "$path"; then
         if [[ -f "$path" ]]; then register_path "$path"; else unknown "$key declara un archivo PHP ausente: $path"; fi
       elif [[ "$path" == *.so || "$path" == */mods-available/*.ini || "$path" == */php.d/*.ini ]]; then
         say "  Extensión/configuración de $key: $path"
@@ -394,7 +414,7 @@ def load(cve):
         with urllib.request.urlopen(url, timeout=12) as response:
             if response.geturl() != url:
                 return None
-            data = json.loads(response.read(2000000))
+            data = json.loads(response.read(2000000).decode("utf-8"))
         if data.get("id") != cve:
             return None
         rows = []
@@ -1533,9 +1553,9 @@ main() {
       family=rpm
     fi
   fi
-  if [[ -d /usr/local/cpanel ]]; then panel=cPanel
-  elif [[ -d /usr/local/directadmin ]]; then panel=DirectAdmin
-  elif [[ -d /usr/local/psa || -d /opt/psa || -e /etc/psa/psa.conf ]]; then panel=Plesk
+  panel=$(detect_panel)
+  if [[ "$panel" != cPanel && -d /usr/local/cpanel ]]; then
+    say 'Aviso: se encontró /usr/local/cpanel sin ejecutables de cPanel o WHM.'
   fi
   say "Sistema: ${pretty:-$os $release} | gestor: $family | ciclo: $status_os ${lifecycle_end:-sin fecha verificada} | panel: $panel"
   case "$panel" in
