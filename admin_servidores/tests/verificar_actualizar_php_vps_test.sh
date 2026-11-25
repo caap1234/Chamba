@@ -392,6 +392,10 @@ grep -q '^Resultado: 3 ' "$work/console.log" || fail 'resumen final incompleto'
 [[ ! -e "$work/logger" ]] || fail 'directorio de trabajo sin limpiar'
 pass 'el cierre del log entrega el resumen y conserva el código de salida'
 
+help_text | grep -q -- '--update.*predeterminado' || fail 'la ayuda debe marcar update como predeterminado'
+grep -Eq '^[[:space:]]*local mode=update\b' "$script" || fail 'el modo predeterminado de main debe ser update'
+pass 'modo predeterminado update y documentación en la ayuda'
+
 (
   # shellcheck disable=SC2329 # main invoca uname de forma indirecta.
   uname() { printf '%s\n' 'SistemaFixture'; }

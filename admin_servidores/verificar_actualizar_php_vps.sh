@@ -40,13 +40,14 @@ help_text() {
   cat <<'HELP'
 Uso: verificar_actualizar_php_vps.sh [--check | --dry-run | --update] [--force]
 
-  --check    Inventario y auditoría con los índices locales (predeterminado).
+  --check    Inventario y auditoría con los índices locales.
   --dry-run  Simula y valida la transacción sin instalar ni reiniciar.
-  --update   Refresca índices privados, simula y aplica una transacción validada.
+  --update   Refresca índices privados, simula y aplica una transacción validada (predeterminado).
   --force    Refresca índices privados también en auditoría o simulación.
   --help     Muestra esta ayuda.
 
 Ejemplos:
+  sudo bash verificar_actualizar_php_vps.sh
   sudo bash verificar_actualizar_php_vps.sh --check --force
   sudo bash verificar_actualizar_php_vps.sh --dry-run --force
   sudo bash verificar_actualizar_php_vps.sh --update
@@ -1619,7 +1620,7 @@ require_root() {
 }
 
 main() {
-  local mode=check mode_selected=0 force=0 refresh=0 option
+  local mode=update mode_selected=0 force=0 refresh=0 option
   for option in "$@"; do
     case "$option" in
       --help) help_text; return 0 ;;
