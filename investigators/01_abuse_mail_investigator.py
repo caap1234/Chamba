@@ -1,6 +1,6 @@
 #!/bin/sh
-''''exec "$(command -v python3 || command -v python || /usr/local/cpanel/3rdparty/bin/python3 || echo python)" "$0" "$@" # '''
 # -*- coding: utf-8 -*-
+''''exec "$(command -v python3 || { test -x /usr/local/cpanel/3rdparty/bin/python3 && echo /usr/local/cpanel/3rdparty/bin/python3; } || command -v python || echo python)" "$0" "$@" # '''
 from __future__ import print_function, absolute_import, division
 """
 01. Abuse Mail Investigator
@@ -28,6 +28,11 @@ import re
 import sys
 import time
 from email.header import decode_header, make_header
+
+try:
+    unicode
+except NameError:
+    unicode = str
 
 try:
     input = raw_input

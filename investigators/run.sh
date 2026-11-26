@@ -7,10 +7,10 @@
 PY_BIN=""
 if command -v python3 >/dev/null 2>&1; then
     PY_BIN="python3"
-elif command -v python >/dev/null 2>&1; then
-    PY_BIN="python"
 elif [ -x /usr/local/cpanel/3rdparty/bin/python3 ]; then
     PY_BIN="/usr/local/cpanel/3rdparty/bin/python3"
+elif command -v python >/dev/null 2>&1; then
+    PY_BIN="python"
 elif command -v python2 >/dev/null 2>&1; then
     PY_BIN="python2"
 else
