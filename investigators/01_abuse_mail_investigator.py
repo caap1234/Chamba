@@ -17,8 +17,48 @@ con X-Forwarded-For en logs de cPanel/DirectAdmin.
 Incluye sección de evidencia con líneas completas listas para Iris.
 """
 
-import argparse
+try:
+    import argparse
+    HAVE_ARGPARSE = True
+except ImportError:
+    import optparse
+    HAVE_ARGPARSE = False
+
 import collections
+
+try:
+    from collections import Counter
+except ImportError:
+    class Counter(dict):
+        def __init__(self, iterable=None, **kwds):
+            super(Counter, self).__init__()
+            self.update(iterable, **kwds)
+
+        def __missing__(self, key):
+            return 0
+
+        def most_common(self, n=None):
+            items = sorted(self.items(), key=lambda x: x[1], reverse=True)
+            if n is not None:
+                return items[:n]
+            return items
+
+        def update(self, iterable=None, **kwds):
+            if iterable is not None:
+                if hasattr(iterable, 'iteritems'):
+                    for k, v in iterable.iteritems():
+                        self[k] = self.get(k, 0) + v
+                elif hasattr(iterable, 'items'):
+                    for k, v in iterable.items():
+                        self[k] = self.get(k, 0) + v
+                else:
+                    for elem in iterable:
+                        self[elem] = self.get(elem, 0) + 1
+            if kwds:
+                self.update(kwds)
+
+if not hasattr(collections, 'Counter'):
+    collections.Counter = Counter
 import datetime as dt
 import glob
 import gzip
@@ -52,20 +92,30 @@ IP_BRACKETS = re.compile(r'\[([0-9a-fA-F:.]+)\]')
 IP_SIMPLE = re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b')
 X_FORWARDED_FOR = re.compile(r'X-Forwarded-For:\s*([0-9a-fA-F:.]+)', re.IGNORECASE)
 
-AUTH_PROTOCOLS = {'esmtpa', 'esmtpsa', 'smtpa', 'smtpsa', 'utf8esmtpa', 'utf8esmtpsa'}
-LOCAL_PROTOCOLS = {'local', 'local-bsmtp', 'local-esmtp'}
-FILTER_USERS = {'mail', 'exim', 'mailnull', 'debian-exim', 'dovecot'}
-IGNORE_CWD = {'/var/spool/exim', '/etc/csf', '/var/spool/cron', '/usr/local/cpanel/whostmgr/docroot'}
-MONTHS = {m: i for i, m in enumerate(['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'], 1)}
+AUTH_PROTOCOLS = set(['esmtpa', 'esmtpsa', 'smtpa', 'smtpsa', 'utf8esmtpa', 'utf8esmtpsa'])
+LOCAL_PROTOCOLS = set(['local', 'local-bsmtp', 'local-esmtp'])
+FILTER_USERS = set(['mail', 'exim', 'mailnull', 'debian-exim', 'dovecot'])
+IGNORE_CWD = set(['/var/spool/exim', '/etc/csf', '/var/spool/cron', '/usr/local/cpanel/whostmgr/docroot'])
+MONTHS = {
+    'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4, 'May': 5, 'Jun': 6,
+    'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12
+}
 
 
 def to_timestamp(d):
-    """Convierte datetime a timestamp Unix (compatible con Python 2.7 y 3)."""
+    """Convierte datetime a timestamp Unix (compatible con Python 2.6, 2.7 y 3)."""
     if d is None:
         return None
     if hasattr(d, 'timestamp'):
         return d.timestamp()
     return time.mktime(d.timetuple()) + d.microsecond / 1e6
+
+
+def timedelta_total_seconds(td):
+    """Calcula los segundos totales de un timedelta (compatible con Python 2.6, 2.7 y 3)."""
+    if hasattr(td, 'total_seconds'):
+        return td.total_seconds()
+    return (td.microseconds + (td.seconds + td.days * 24 * 3600) * 10**6) / 10**6
 
 
 def open_log_file(path):
@@ -299,7 +349,7 @@ def search_webmail_forwarder(access_logs, target_user, target_emails, send_times
                     # Verificar si cae dentro de la ventana de alguno de los envíos
                     is_near_send = False
                     for st in send_times:
-                        if abs((time_stamp - st).total_seconds()) <= window_seconds:
+                        if abs(timedelta_total_seconds(time_stamp - st)) <= window_seconds:
                             is_near_send = True
                             break
                     if not is_near_send and len(send_times) > 0:
@@ -332,8 +382,11 @@ def build_report_section(out, title, counter, top=20, unit=''):
         out.append('Sin registros.')
         return
     for item, count in counter.most_common(top):
-        if sys.version_info[0] < 3 and isinstance(item, unicode):
-            item = item.encode('utf-8', 'replace')
+        if sys.version_info[0] < 3:
+            if isinstance(item, unicode):
+                item = item.encode('utf-8', 'replace')
+            if isinstance(unit, unicode):
+                unit = unit.encode('utf-8', 'replace')
         out.append('{0:>8} {1} {2}'.format(count, unit, item))
 
 
@@ -350,22 +403,47 @@ def main():
         "  python <(wget -qO- https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/01_abuse_mail_investigator.py) --domain dominio.com --top 30\n"
         "  python <(curl -sL https://raw.githubusercontent.com/caap1234/Chamba/main/investigators/01_abuse_mail_investigator.py) --server directadmin\n"
     )
-    parser = argparse.ArgumentParser(
-        description='01. Abuse Mail Investigator — Auditoría Forense de Exim, Dovecot y Webmail (cPanel & DirectAdmin)',
-        epilog=epilog,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument('--server', choices=['cpanel', 'directadmin', 'auto'], default='auto',
-                        help='Tipo de servidor (cpanel o directadmin). Auto por defecto.')
-    parser.add_argument('--email', help='Filtrar específicamente por cuenta de correo (ej. info@empresa.com)')
-    parser.add_argument('--domain', help='Filtrar por dominio completo (ej. empresa.com)')
-    parser.add_argument('--days', type=int, default=3, help='Días hacia atrás a investigar (por defecto 3)')
-    parser.add_argument('--top', type=int, default=20, help='Límite de elementos por sección (por defecto 20)')
-    parser.add_argument('--output', help='Ruta para guardar el reporte en un archivo')
-    parser.add_argument('--exim-log', help='Ruta personalizada de log de Exim')
-    parser.add_argument('--mail-log', help='Ruta personalizada de log de Dovecot/Mail')
-    parser.add_argument('--cpanel-access-log', help='Ruta personalizada de access_log de cPanel')
-    parser.add_argument('--interactive', action='store_true', help='Iniciar en modo interactivo')
+    desc = '01. Abuse Mail Investigator — Auditoría Forense de Exim, Dovecot y Webmail (cPanel & DirectAdmin)'
+    if HAVE_ARGPARSE:
+        parser = argparse.ArgumentParser(
+            description=desc,
+            epilog=epilog,
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+        )
+        parser.add_argument('--server', choices=['cpanel', 'directadmin', 'auto'], default='auto',
+                            help='Tipo de servidor (cpanel o directadmin). Auto por defecto.')
+        parser.add_argument('--email', help='Filtrar específicamente por cuenta de correo (ej. info@empresa.com)')
+        parser.add_argument('--domain', help='Filtrar por dominio completo (ej. empresa.com)')
+        parser.add_argument('--days', type=int, default=3, help='Días hacia atrás a investigar (por defecto 3)')
+        parser.add_argument('--top', type=int, default=20, help='Límite de elementos por sección (por defecto 20)')
+        parser.add_argument('--output', help='Ruta para guardar el reporte en un archivo')
+        parser.add_argument('--exim-log', help='Ruta personalizada de log de Exim')
+        parser.add_argument('--mail-log', help='Ruta personalizada de log de Dovecot/Mail')
+        parser.add_argument('--cpanel-access-log', help='Ruta personalizada de access_log de cPanel')
+        parser.add_argument('--interactive', action='store_true', help='Iniciar en modo interactivo')
+    else:
+        def to_unicode(s):
+            if isinstance(s, unicode):
+                return s
+            try:
+                return s.decode('utf-8')
+            except Exception:
+                return s.decode('latin1', 'replace')
+
+        parser = optparse.OptionParser(
+            usage=to_unicode("Uso: %prog [opciones]\n\n") + to_unicode(desc) + to_unicode("\n\n") + to_unicode(epilog)
+        )
+        parser.add_option('--server', choices=['cpanel', 'directadmin', 'auto'], default='auto',
+                          help=to_unicode('Tipo de servidor (cpanel o directadmin). Auto por defecto.'))
+        parser.add_option('--email', help=to_unicode('Filtrar específicamente por cuenta de correo (ej. info@empresa.com)'))
+        parser.add_option('--domain', help=to_unicode('Filtrar por dominio completo (ej. empresa.com)'))
+        parser.add_option('--days', type='int', default=3, help=to_unicode('Días hacia atrás a investigar (por defecto 3)'))
+        parser.add_option('--top', type='int', default=20, help=to_unicode('Límite de elementos por sección (por defecto 20)'))
+        parser.add_option('--output', help=to_unicode('Ruta para guardar el reporte en un archivo'))
+        parser.add_option('--exim-log', dest='exim_log', help=to_unicode('Ruta personalizada de log de Exim'))
+        parser.add_option('--mail-log', dest='mail_log', help=to_unicode('Ruta personalizada de log de Dovecot/Mail'))
+        parser.add_option('--cpanel-access-log', dest='cpanel_access_log', help=to_unicode('Ruta personalizada de access_log de cPanel'))
+        parser.add_option('--interactive', action='store_true', default=False, help=to_unicode('Iniciar en modo interactivo'))
 
     # Si se ejecuta sin parámetros en una terminal interactiva, guiar al analista
     if len(sys.argv) == 1 and sys.stdin.isatty():
@@ -383,7 +461,10 @@ def main():
         elif opt == '1' or opt == '':
             sys.argv.append('--interactive')
 
-    args = parser.parse_args()
+    if HAVE_ARGPARSE:
+        args = parser.parse_args()
+    else:
+        args, _ = parser.parse_args()
 
     # Selección de servidor
     server = args.server
